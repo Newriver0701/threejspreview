@@ -38,6 +38,7 @@ const status = document.querySelector("#status");
 const errorPanel = document.querySelector("#error-panel");
 const errorOutput = document.querySelector("#error-output");
 const clearErrorButton = document.querySelector("#clear-error");
+const previewResolutionSelect = document.querySelector("#preview-resolution");
 const resolutionSelect = document.querySelector("#export-resolution");
 const durationInput = document.querySelector("#export-duration");
 const qualitySelect = document.querySelector("#export-quality");
@@ -49,12 +50,36 @@ const exportProgressText = document.querySelector("#export-progress-text");
 
 let runId = 0;
 let exporting = false;
+let previewReady = false;
+let resizingPreview = false;
 let ffmpegInstance = null;
 let ffmpegFetchFile = null;
 let frameRequestId = 0;
 const pendingFrameRequests = new Map();
 
 editor.value = localStorage.getItem("three-preview-code") || SAMPLE_CODE;
+previewResolutionSelect.value = localStorage.getItem("three-preview-resolution") || "720x1280";
+resolutionSelect.value = localStorage.getItem("three-export-resolution") || "720x1280@30";
+
+function parseSize(value) {
+  const [width, height] = value.split("x").map(Number);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    throw new Error("解像度の設定が正しくありません。");
+  }
+  return { width, height };
+}
+
+function getPreviewSize() {
+  return parseSize(previewResolutionSelect.value);
+}
+
+function updatePreviewViewport() {
+  const { width, height } = getPreviewSize();
+  frame.parentElement.style.setProperty("--preview-ratio", String(width / height));
+  frame.setAttribute("aria-label", `プレビュー ${width} × ${height}`);
+}
+
+updatePreviewViewport();
 
 function setStatus(kind, label) {
   status.className = `status ${kind || ""}`.trim();
@@ -80,8 +105,10 @@ function runCode() {
   if (exporting) return;
   clearError();
   runId += 1;
+  previewReady = false;
   localStorage.setItem("three-preview-code", editor.value);
   exportButton.disabled = true;
+  previewResolutionSelect.disabled = true;
   emptyState.hidden = true;
   setStatus("", "読み込み中");
 
@@ -93,7 +120,7 @@ function runCode() {
   const sendInitialization = () => {
     if (currentRunId === runId) {
       frame.dataset.initSent = String(Number(frame.dataset.initSent || 0) + 1);
-      postToPreview("initialize", { code: editor.value });
+      postToPreview("initialize", { code: editor.value, ...getPreviewSize() });
     }
   };
   setTimeout(sendInitialization, 250);
@@ -131,9 +158,9 @@ function requestPngFrame(timeSeconds) {
     }, 30_000);
 
     pendingFrameRequests.set(requestId, {
-      resolve(blob) {
+      resolve(frameData) {
         clearTimeout(timer);
-        resolve(blob);
+        resolve(frameData);
       },
       reject(error) {
         clearTimeout(timer);
@@ -147,7 +174,7 @@ function requestPngFrame(timeSeconds) {
 
 function getExportSettings() {
   const [size, fpsText] = resolutionSelect.value.split("@");
-  const [width, height] = size.split("x").map(Number);
+  const { width, height } = parseSize(size);
   const duration = Math.max(1, Math.min(30, Number(durationInput.value) || 10));
   const quality = {
     high: { crf: "20", preset: "veryfast" },
@@ -157,6 +184,28 @@ function getExportSettings() {
 
   durationInput.value = String(duration);
   return { width, height, fps: Number(fpsText), duration, ...quality };
+}
+
+async function resizePreview() {
+  updatePreviewViewport();
+  localStorage.setItem("three-preview-resolution", previewResolutionSelect.value);
+  if (!previewReady || exporting || resizingPreview) return;
+
+  resizingPreview = true;
+  previewResolutionSelect.disabled = true;
+  clearError();
+  setStatus("", "サイズ変更中");
+  try {
+    const resized = waitForPreview("preview-resized", "preview-resize-error");
+    postToPreview("preview-resize", getPreviewSize());
+    await resized;
+    setStatus("running", "実行中");
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    resizingPreview = false;
+    previewResolutionSelect.disabled = false;
+  }
 }
 
 function setExportProgress(value, message) {
@@ -221,6 +270,8 @@ async function runMp4Export() {
   exportButton.disabled = true;
   runButton.disabled = true;
   resetButton.disabled = true;
+  previewResolutionSelect.disabled = true;
+  resolutionSelect.disabled = true;
   exportLabel.textContent = "書き出し中…";
 
   const writtenFrames = [];
@@ -238,9 +289,12 @@ async function runMp4Export() {
     previewExportStarted = true;
 
     for (let index = 0; index < frameCount; index += 1) {
-      const blob = await requestPngFrame(index / settings.fps);
+      const frameData = await requestPngFrame(index / settings.fps);
+      if (frameData.width !== settings.width || frameData.height !== settings.height) {
+        throw new Error(`PNGの解像度が一致しません（${frameData.width}×${frameData.height}）。`);
+      }
       const filename = `frame_${String(index + 1).padStart(6, "0")}.png`;
-      await ffmpeg.writeFile(filename, await fetchFile(blob));
+      await ffmpeg.writeFile(filename, await fetchFile(frameData.blob));
       writtenFrames.push(filename);
       setExportProgress(((index + 1) / frameCount) * 0.8, `PNG生成 ${index + 1} / ${frameCount}`);
     }
@@ -273,7 +327,15 @@ async function runMp4Export() {
   } catch (error) {
     showError(error.stack || error.message);
   } finally {
-    if (previewExportStarted) postToPreview("export-end");
+    if (previewExportStarted) {
+      try {
+        const restored = waitForPreview("export-ended", "export-restore-error");
+        postToPreview("export-end");
+        await restored;
+      } catch (error) {
+        showError(error.message);
+      }
+    }
     if (ffmpegInstance) {
       const frameCleanup = await Promise.allSettled(writtenFrames.map((filename) => ffmpegInstance.deleteFile(filename)));
       let outputDeleted = true;
@@ -288,6 +350,8 @@ async function runMp4Export() {
     exportButton.disabled = false;
     runButton.disabled = false;
     resetButton.disabled = false;
+    previewResolutionSelect.disabled = false;
+    resolutionSelect.disabled = false;
     exportLabel.textContent = "MP4を書き出す";
   }
 }
@@ -297,24 +361,29 @@ window.addEventListener("message", (event) => {
   if (event.source !== frame.contentWindow || data?.source !== "three-preview") return;
 
   if (data.type === "runtime-ready") {
-    postToPreview("initialize", { code: editor.value });
+    postToPreview("initialize", { code: editor.value, ...getPreviewSize() });
     return;
   }
 
   if (data.runId !== runId) return;
 
   if (data.type === "ready") {
+    previewReady = true;
+    previewResolutionSelect.disabled = false;
     setStatus("running", "実行中");
     exportButton.disabled = false;
   }
 
-  if (data.type === "error" || data.type === "console-error") showError(data.message);
+  if (data.type === "error" || data.type === "console-error") {
+    previewResolutionSelect.disabled = false;
+    showError(data.message);
+  }
 
   if (data.type === "export-frame" || data.type === "export-frame-error") {
     const pending = pendingFrameRequests.get(data.requestId);
     if (!pending) return;
     pendingFrameRequests.delete(data.requestId);
-    if (data.type === "export-frame") pending.resolve(data.blob);
+    if (data.type === "export-frame") pending.resolve({ blob: data.blob, width: data.width, height: data.height });
     else pending.reject(new Error(data.message));
   }
 });
@@ -327,6 +396,10 @@ resetButton.addEventListener("click", () => {
 });
 clearErrorButton.addEventListener("click", clearError);
 exportButton.addEventListener("click", runMp4Export);
+previewResolutionSelect.addEventListener("change", resizePreview);
+resolutionSelect.addEventListener("change", () => {
+  localStorage.setItem("three-export-resolution", resolutionSelect.value);
+});
 
 editor.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {

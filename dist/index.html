@@ -46,6 +46,17 @@
             <h2 id="preview-title">Preview</h2>
           </div>
           <div class="preview-tools">
+            <label class="preview-size-field">
+              <span>表示サイズ</span>
+              <select id="preview-resolution">
+                <option value="1080x1920">縦 1080 × 1920</option>
+                <option value="720x1280" selected>縦 720 × 1280</option>
+                <option value="540x960">縦 540 × 960</option>
+                <option value="360x640">縦 360 × 640</option>
+                <option value="1080x1080">正方形 1080 × 1080</option>
+                <option value="1920x1080">横 1920 × 1080</option>
+              </select>
+            </label>
             <span id="status" class="status" role="status"><i></i>待機中</span>
           </div>
         </div>
@@ -80,6 +91,8 @@
                 <option value="720x1280@30" selected>720 × 1280 / 30fps</option>
                 <option value="540x960@24">540 × 960 / 24fps</option>
                 <option value="360x640@24">360 × 640 / 24fps</option>
+                <option value="1080x1080@30">1080 × 1080 / 30fps</option>
+                <option value="1920x1080@30">1920 × 1080 / 30fps</option>
               </select>
             </label>
 

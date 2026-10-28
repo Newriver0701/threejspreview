@@ -25,8 +25,12 @@
       let rendering = false;
       let previewFailed = false;
       let previewStartedAt = performance.now();
-      let previewWidth = window.innerWidth;
-      let previewHeight = window.innerHeight;
+      let previewWidth = 720;
+      let previewHeight = 1280;
+      let exportWidth = 0;
+      let exportHeight = 0;
+      const trackedThree = { renderer: null, camera: null };
+      const normalizedCanvas = document.createElement("canvas");
 
       const send = (type, payload = {}) => {
         parent.postMessage({ source: "three-preview", runId, type, ...payload }, "*");
@@ -42,6 +46,53 @@
         try { return JSON.stringify(value, null, 2); } catch { return String(value); }
       };
 
+      function trackRenderer(renderer) {
+        trackedThree.renderer = renderer;
+        if (renderer.__threePreviewTracked) return renderer;
+        const originalRender = renderer.render;
+        Object.defineProperty(renderer, "__threePreviewTracked", { value: true });
+        renderer.render = function (scene, camera) {
+          trackedThree.renderer = this;
+          trackedThree.camera = camera;
+          return originalRender.call(this, scene, camera);
+        };
+        return renderer;
+      }
+
+      function createTrackedThree(module) {
+        let TrackedWebGLRenderer;
+        TrackedWebGLRenderer = new Proxy(module.WebGLRenderer, {
+          construct(target, args, newTarget) {
+            const actualNewTarget = newTarget === TrackedWebGLRenderer ? target : newTarget;
+            return trackRenderer(Reflect.construct(target, args, actualNewTarget));
+          }
+        });
+        return Object.assign(Object.create(null), module, { WebGLRenderer: TrackedWebGLRenderer });
+      }
+
+      async function automaticSetRenderSize(width, height) {
+        const renderer = trackedThree.renderer;
+        if (!renderer || typeof renderer.setSize !== "function") {
+          throw new Error("Three.jsのレンダラーを自動取得できません。globalThis.setRenderSize(width, height) を定義してください。");
+        }
+
+        if (typeof renderer.setPixelRatio === "function") renderer.setPixelRatio(1);
+        const camera = trackedThree.camera;
+        if (camera?.isPerspectiveCamera) {
+          camera.aspect = width / height;
+        } else if (camera?.isOrthographicCamera) {
+          const centerX = (camera.left + camera.right) / 2;
+          const verticalSpan = camera.top - camera.bottom;
+          const horizontalSpan = verticalSpan * (width / height);
+          camera.left = centerX - horizontalSpan / 2;
+          camera.right = centerX + horizontalSpan / 2;
+        } else if (camera && "aspect" in camera) {
+          camera.aspect = width / height;
+        }
+        if (typeof camera?.updateProjectionMatrix === "function") camera.updateProjectionMatrix();
+        renderer.setSize(width, height, false);
+      }
+
       const nextPaint = () => new Promise((resolve) => {
         let settled = false;
         const finish = () => {
@@ -53,8 +104,19 @@
         setTimeout(finish, 50);
       });
 
-      const canvasToPngBlob = (canvas) => new Promise((resolve, reject) => {
+      const canvasToPngBlob = (sourceCanvas) => new Promise((resolve, reject) => {
         try {
+          let canvas = sourceCanvas;
+          if (exportWidth > 0 && exportHeight > 0 &&
+              (sourceCanvas.width !== exportWidth || sourceCanvas.height !== exportHeight)) {
+            normalizedCanvas.width = exportWidth;
+            normalizedCanvas.height = exportHeight;
+            const context = normalizedCanvas.getContext("2d", { alpha: true });
+            if (!context) throw new Error("書き出し用Canvasを作成できませんでした。");
+            context.clearRect(0, 0, exportWidth, exportHeight);
+            context.drawImage(sourceCanvas, 0, 0, exportWidth, exportHeight);
+            canvas = normalizedCanvas;
+          }
           canvas.toBlob((blob) => {
             if (blob) resolve(blob);
             else reject(new Error("CanvasをPNG化できませんでした。"));
@@ -101,26 +163,16 @@
         while (rendering) await nextPaint();
       }
 
-      async function initialize(code) {
+      async function initialize(code, width, height) {
+        previewWidth = width;
+        previewHeight = height;
         document.documentElement.dataset.stage = "importing-three";
-        const THREE = await import(THREE_MODULE_URL);
+        const threeModule = await import(THREE_MODULE_URL);
         document.documentElement.dataset.stage = "three-loaded";
-        globalThis.THREE = THREE;
+        globalThis.THREE = createTrackedThree(threeModule);
         const userModuleSource = [
           "const THREE = globalThis.THREE;",
           code,
-          `if (typeof globalThis.setRenderSize !== "function" &&
-              typeof renderer !== "undefined" && renderer &&
-              typeof renderer.setSize === "function") {
-            globalThis.setRenderSize = async (width, height) => {
-              if (typeof renderer.setPixelRatio === "function") renderer.setPixelRatio(1);
-              if (typeof camera !== "undefined" && camera) {
-                if ("aspect" in camera) camera.aspect = width / height;
-                if (typeof camera.updateProjectionMatrix === "function") camera.updateProjectionMatrix();
-              }
-              renderer.setSize(width, height, false);
-            };
-          }`,
           "//# sourceURL=three-preview-user-code.js"
         ].join("\n");
         const moduleUrl = URL.createObjectURL(new Blob([userModuleSource], { type: "text/javascript" }));
@@ -136,13 +188,14 @@
         if (typeof globalThis.renderAt !== "function") {
           throw new Error("globalThis.renderAt(timeSeconds) を定義してください。");
         }
-        if (typeof globalThis.setRenderSize !== "function") {
-          throw new Error("globalThis.setRenderSize(width, height) を定義してください。");
-        }
         if (!document.querySelector("canvas")) {
           throw new Error("Three.jsのCanvasが見つかりません。");
         }
 
+        await globalThis.renderAt(0);
+        if (typeof globalThis.setRenderSize !== "function") {
+          globalThis.setRenderSize = automaticSetRenderSize;
+        }
         await resizeRenderer(previewWidth, previewHeight);
         await globalThis.renderAt(0);
         initialized = true;
@@ -150,17 +203,6 @@
         previewStartedAt = performance.now();
         send("ready");
       }
-
-      window.addEventListener("resize", async () => {
-        if (!initialized || exporting) return;
-        previewWidth = window.innerWidth;
-        previewHeight = window.innerHeight;
-        try {
-          await resizeRenderer(previewWidth, previewHeight);
-        } catch (error) {
-          send("error", { message: describe(error) });
-        }
-      });
 
       window.addEventListener("message", async (event) => {
         document.documentElement.dataset.messages = String(Number(document.documentElement.dataset.messages || 0) + 1);
@@ -172,7 +214,7 @@
           runId = data.runId;
           initializing = true;
           try {
-            await initialize(data.code);
+            await initialize(data.code, data.width, data.height);
           } catch (error) {
             send("error", { message: describe(error) });
           } finally {
@@ -183,14 +225,32 @@
 
         if (!initialized || data.runId !== runId) return;
 
+        if (data.type === "preview-resize") {
+          try {
+            await waitForIdle();
+            previewWidth = data.width;
+            previewHeight = data.height;
+            await resizeRenderer(previewWidth, previewHeight);
+            await globalThis.renderAt((performance.now() - previewStartedAt) / 1000);
+            previewFailed = false;
+            send("preview-resized", { width: previewWidth, height: previewHeight });
+          } catch (error) {
+            send("preview-resize-error", { message: describe(error) });
+          }
+        }
+
         if (data.type === "export-begin") {
           try {
             exporting = true;
+            exportWidth = data.width;
+            exportHeight = data.height;
             await waitForIdle();
             await resizeRenderer(data.width, data.height);
             send("export-ready");
           } catch (error) {
             exporting = false;
+            exportWidth = 0;
+            exportHeight = 0;
             send("export-error", { message: describe(error) });
           }
         }
@@ -202,7 +262,7 @@
             const canvas = document.querySelector("canvas");
             if (!canvas) throw new Error("書き出せるCanvasが見つかりません。");
             const blob = await canvasToPngBlob(canvas);
-            send("export-frame", { requestId: data.requestId, blob });
+            send("export-frame", { requestId: data.requestId, blob, width: exportWidth, height: exportHeight });
           } catch (error) {
             send("export-frame-error", { requestId: data.requestId, message: describe(error) });
           }
@@ -211,13 +271,16 @@
         if (data.type === "export-end") {
           try {
             await resizeRenderer(previewWidth, previewHeight);
+            await globalThis.renderAt(0);
             previewStartedAt = performance.now();
             previewFailed = false;
+            send("export-ended", { width: previewWidth, height: previewHeight });
           } catch (error) {
-            send("error", { message: describe(error) });
+            send("export-restore-error", { message: describe(error) });
           } finally {
             exporting = false;
-            send("export-ended");
+            exportWidth = 0;
+            exportHeight = 0;
           }
         }
       });
