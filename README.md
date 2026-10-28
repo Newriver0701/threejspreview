@@ -47,6 +47,8 @@ globalThis.setRenderSize = async (width, height) => {
 
 プレビュー中は`renderAt()`が実時間で呼ばれます。MP4書き出し中はプレビューを停止し、フレーム`i`ごとに`renderAt(i / fps)`を呼んでPNGを生成します。
 
+プレビューとMP4の速度を一致させるため、プレビューの呼び出し回数もMP4側で選択した24fpsまたは30fpsに同期します。ユーザーコード内の独自`requestAnimationFrame()`／`renderer.setAnimationLoop()`は実行されません。アニメーション状態は可能な限り`renderAt(timeSeconds)`の引数から計算し、`rotation.y = timeSeconds * speed`のように時刻から直接求めてください。
+
 ## MP4書き出し
 
 - プレビュー解像度：1080×1920、720×1280、540×960、360×640、1080×1080、1920×1080
