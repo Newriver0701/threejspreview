@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline' 'self' blob:; connect-src https:; img-src https: data: blob:; style-src 'unsafe-inline'; font-src data:;"
+    />
+    <style>
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #0c0d0d; }
+      body { display: grid; place-items: center; }
+      canvas { display: block; max-width: 100%; max-height: 100%; }
+    </style>
+  </head>
+  <body>
+    <script>
+      document.documentElement.dataset.runtime = "loaded";
+      const THREE_MODULE_URL = "/vendor/three/build/three.module.min.js";
+
+      let runId = 0;
+      let initialized = false;
+      let initializing = false;
+      let exporting = false;
+      let rendering = false;
+      let previewFailed = false;
+      let previewStartedAt = performance.now();
+      let previewWidth = window.innerWidth;
+      let previewHeight = window.innerHeight;
+
+      const send = (type, payload = {}) => {
+        parent.postMessage({ source: "three-preview", runId, type, ...payload }, "*");
+      };
+
+      const describe = (value) => {
+        if (value instanceof Error) return value.stack || value.message;
+        if (typeof value === "string") return value;
+        try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+      };
+
+      const nextPaint = () => new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        requestAnimationFrame(finish);
+        setTimeout(finish, 50);
+      });
+
+      const canvasToPngBlob = (canvas) => new Promise((resolve, reject) => {
+        try {
+          canvas.toBlob((blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error("CanvasをPNG化できませんでした。"));
+          }, "image/png");
+        } catch (error) {
+          reject(new Error("CanvasのPNG化に失敗しました。外部画像のCORS設定を確認してください。\n" + error.message));
+        }
+      });
+
+      window.addEventListener("error", (event) => {
+        if (initialized) send("error", { message: event.error?.stack || event.message });
+      });
+
+      window.addEventListener("unhandledrejection", (event) => {
+        if (initialized) send("error", { message: describe(event.reason) });
+      });
+
+      const originalError = console.error;
+      console.error = (...args) => {
+        originalError(...args);
+        if (initialized) send("console-error", { message: args.map(describe).join(" ") });
+      };
+
+      async function resizeRenderer(width, height) {
+        await globalThis.setRenderSize(width, height);
+        await nextPaint();
+      }
+
+      async function renderPreview(now) {
+        requestAnimationFrame(renderPreview);
+        if (!initialized || exporting || rendering || previewFailed) return;
+        rendering = true;
+        try {
+          await globalThis.renderAt((now - previewStartedAt) / 1000);
+        } catch (error) {
+          previewFailed = true;
+          send("error", { message: error.stack || error.message });
+        } finally {
+          rendering = false;
+        }
+      }
+
+      async function waitForIdle() {
+        while (rendering) await nextPaint();
+      }
+
+      async function initialize(code) {
+        document.documentElement.dataset.stage = "importing-three";
+        const THREE = await import(THREE_MODULE_URL);
+        document.documentElement.dataset.stage = "three-loaded";
+        globalThis.THREE = THREE;
+        const userModuleSource = [
+          "const THREE = globalThis.THREE;",
+          code,
+          "//# sourceURL=three-preview-user-code.js"
+        ].join("\n");
+        const moduleUrl = URL.createObjectURL(new Blob([userModuleSource], { type: "text/javascript" }));
+
+        try {
+          document.documentElement.dataset.stage = "importing-user-code";
+          await import(moduleUrl);
+          document.documentElement.dataset.stage = "user-code-loaded";
+        } finally {
+          URL.revokeObjectURL(moduleUrl);
+        }
+
+        if (typeof globalThis.renderAt !== "function") {
+          throw new Error("globalThis.renderAt(timeSeconds) を定義してください。");
+        }
+        if (typeof globalThis.setRenderSize !== "function") {
+          throw new Error("globalThis.setRenderSize(width, height) を定義してください。");
+        }
+        if (!document.querySelector("canvas")) {
+          throw new Error("Three.jsのCanvasが見つかりません。");
+        }
+
+        await resizeRenderer(previewWidth, previewHeight);
+        await globalThis.renderAt(0);
+        initialized = true;
+        document.documentElement.dataset.stage = "initialized";
+        previewStartedAt = performance.now();
+        send("ready");
+      }
+
+      window.addEventListener("resize", async () => {
+        if (!initialized || exporting) return;
+        previewWidth = window.innerWidth;
+        previewHeight = window.innerHeight;
+        try {
+          await resizeRenderer(previewWidth, previewHeight);
+        } catch (error) {
+          send("error", { message: error.stack || error.message });
+        }
+      });
+
+      window.addEventListener("message", async (event) => {
+        document.documentElement.dataset.messages = String(Number(document.documentElement.dataset.messages || 0) + 1);
+        if (event.source !== parent || event.data?.source !== "three-preview-host") return;
+        const data = event.data;
+
+        if (data.type === "initialize") {
+          if (initialized || initializing) return;
+          runId = data.runId;
+          initializing = true;
+          try {
+            await initialize(data.code);
+          } catch (error) {
+            send("error", { message: error.stack || error.message });
+          } finally {
+            if (!initialized) initializing = false;
+          }
+          return;
+        }
+
+        if (!initialized || data.runId !== runId) return;
+
+        if (data.type === "export-begin") {
+          try {
+            exporting = true;
+            await waitForIdle();
+            await resizeRenderer(data.width, data.height);
+            send("export-ready");
+          } catch (error) {
+            exporting = false;
+            send("export-error", { message: error.stack || error.message });
+          }
+        }
+
+        if (data.type === "export-frame") {
+          try {
+            await globalThis.renderAt(data.timeSeconds);
+            await nextPaint();
+            const canvas = document.querySelector("canvas");
+            if (!canvas) throw new Error("書き出せるCanvasが見つかりません。");
+            const blob = await canvasToPngBlob(canvas);
+            send("export-frame", { requestId: data.requestId, blob });
+          } catch (error) {
+            send("export-frame-error", { requestId: data.requestId, message: error.stack || error.message });
+          }
+        }
+
+        if (data.type === "export-end") {
+          try {
+            await resizeRenderer(previewWidth, previewHeight);
+            previewStartedAt = performance.now();
+            previewFailed = false;
+          } catch (error) {
+            send("error", { message: error.stack || error.message });
+          } finally {
+            exporting = false;
+            send("export-ended");
+          }
+        }
+      });
+
+      requestAnimationFrame(renderPreview);
+      document.documentElement.dataset.runtime = "ready";
+      send("runtime-ready");
+    </script>
+  </body>
+</html>
