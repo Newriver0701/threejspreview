@@ -33,7 +33,11 @@
       };
 
       const describe = (value) => {
-        if (value instanceof Error) return value.stack || value.message;
+        if (value instanceof Error) {
+          const message = value.message || String(value);
+          const stack = value.stack || "";
+          return stack.includes(message) ? stack : [message, stack].filter(Boolean).join("\n");
+        }
         if (typeof value === "string") return value;
         try { return JSON.stringify(value, null, 2); } catch { return String(value); }
       };
@@ -87,7 +91,7 @@
           await globalThis.renderAt((now - previewStartedAt) / 1000);
         } catch (error) {
           previewFailed = true;
-          send("error", { message: error.stack || error.message });
+          send("error", { message: describe(error) });
         } finally {
           rendering = false;
         }
@@ -105,6 +109,18 @@
         const userModuleSource = [
           "const THREE = globalThis.THREE;",
           code,
+          `if (typeof globalThis.setRenderSize !== "function" &&
+              typeof renderer !== "undefined" && renderer &&
+              typeof renderer.setSize === "function") {
+            globalThis.setRenderSize = async (width, height) => {
+              if (typeof renderer.setPixelRatio === "function") renderer.setPixelRatio(1);
+              if (typeof camera !== "undefined" && camera) {
+                if ("aspect" in camera) camera.aspect = width / height;
+                if (typeof camera.updateProjectionMatrix === "function") camera.updateProjectionMatrix();
+              }
+              renderer.setSize(width, height, false);
+            };
+          }`,
           "//# sourceURL=three-preview-user-code.js"
         ].join("\n");
         const moduleUrl = URL.createObjectURL(new Blob([userModuleSource], { type: "text/javascript" }));
@@ -142,7 +158,7 @@
         try {
           await resizeRenderer(previewWidth, previewHeight);
         } catch (error) {
-          send("error", { message: error.stack || error.message });
+          send("error", { message: describe(error) });
         }
       });
 
@@ -158,7 +174,7 @@
           try {
             await initialize(data.code);
           } catch (error) {
-            send("error", { message: error.stack || error.message });
+            send("error", { message: describe(error) });
           } finally {
             if (!initialized) initializing = false;
           }
@@ -175,7 +191,7 @@
             send("export-ready");
           } catch (error) {
             exporting = false;
-            send("export-error", { message: error.stack || error.message });
+            send("export-error", { message: describe(error) });
           }
         }
 
@@ -188,7 +204,7 @@
             const blob = await canvasToPngBlob(canvas);
             send("export-frame", { requestId: data.requestId, blob });
           } catch (error) {
-            send("export-frame-error", { requestId: data.requestId, message: error.stack || error.message });
+            send("export-frame-error", { requestId: data.requestId, message: describe(error) });
           }
         }
 
@@ -198,7 +214,7 @@
             previewStartedAt = performance.now();
             previewFailed = false;
           } catch (error) {
-            send("error", { message: error.stack || error.message });
+            send("error", { message: describe(error) });
           } finally {
             exporting = false;
             send("export-ended");

@@ -23,6 +23,7 @@ globalThis.renderAt = async (timeSeconds) => {
 
 // プレビューサイズ・書き出し解像度の変更時に呼ばれます。
 globalThis.setRenderSize = async (width, height) => {
+  renderer.setPixelRatio(1);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
   renderer.setSize(width, height, false);
