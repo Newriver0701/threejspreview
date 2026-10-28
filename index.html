@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Three.jsコードを貼り付けて、プレビューと決定論的なMP4書き出しができる環境。" />
+    <meta name="theme-color" content="#f4f3ef" />
+    <title>Three.js Preview</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">THREE.JS PLAYGROUND</p>
+          <h1>Three.js Preview</h1>
+        </div>
+        <p class="intro">コードを貼って、時刻どおりにプレビュー。PNG連番から滑らかなMP4を書き出せます。</p>
+      </header>
+
+      <section class="panel editor-panel" aria-labelledby="editor-title">
+        <div class="panel-head">
+          <div>
+            <span class="step">01</span>
+            <h2 id="editor-title">JavaScript</h2>
+          </div>
+          <span class="hint">Ctrl / ⌘ + Enter で実行</span>
+        </div>
+
+        <label class="sr-only" for="code-editor">Three.js JavaScriptコード</label>
+        <textarea id="code-editor" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+
+        <div class="actions">
+          <button id="run-button" class="button button-primary" type="button">
+            <span class="button-icon" aria-hidden="true">▶</span>
+            コードを実行
+          </button>
+          <button id="reset-button" class="button button-quiet" type="button">サンプルに戻す</button>
+        </div>
+      </section>
+
+      <section class="panel preview-panel" aria-labelledby="preview-title">
+        <div class="panel-head preview-head">
+          <div>
+            <span class="step">02</span>
+            <h2 id="preview-title">Preview</h2>
+          </div>
+          <div class="preview-tools">
+            <span id="status" class="status" role="status"><i></i>待機中</span>
+          </div>
+        </div>
+
+        <div class="stage-wrap">
+          <iframe
+            id="preview-frame"
+            title="Three.jsコードの隔離プレビュー"
+            sandbox="allow-scripts allow-same-origin"
+            referrerpolicy="no-referrer"
+          ></iframe>
+          <div id="empty-state" class="empty-state">
+            <span class="empty-mark" aria-hidden="true">3D</span>
+            <p>コードを実行すると、ここに表示されます。</p>
+          </div>
+        </div>
+
+        <div class="export-panel" aria-labelledby="export-title">
+          <div class="export-heading">
+            <div>
+              <span class="step">03</span>
+              <h2 id="export-title">MP4 Export</h2>
+            </div>
+            <span class="export-note">PNG連番 → H.264</span>
+          </div>
+
+          <div class="export-controls">
+            <label class="field">
+              <span>解像度 / FPS</span>
+              <select id="export-resolution">
+                <option value="1080x1920@30">1080 × 1920 / 30fps</option>
+                <option value="720x1280@30" selected>720 × 1280 / 30fps</option>
+                <option value="540x960@24">540 × 960 / 24fps</option>
+                <option value="360x640@24">360 × 640 / 24fps</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>動画時間（秒）</span>
+              <input id="export-duration" type="number" min="1" max="30" step="1" value="10" />
+            </label>
+
+            <label class="field">
+              <span>画質</span>
+              <select id="export-quality">
+                <option value="high">高画質 / CRF 20</option>
+                <option value="standard" selected>標準 / CRF 24</option>
+                <option value="fast">高速 / CRF 28</option>
+              </select>
+            </label>
+
+            <button id="export-button" class="button button-export" type="button" disabled>
+              <span class="button-icon" aria-hidden="true">↓</span>
+              <span id="export-label">MP4を書き出す</span>
+            </button>
+          </div>
+
+          <div id="export-progress" class="export-progress" role="status" hidden>
+            <progress id="export-progress-bar" max="1" value="0"></progress>
+            <span id="export-progress-text">準備中…</span>
+          </div>
+        </div>
+      </section>
+
+      <section id="error-panel" class="panel error-panel" aria-labelledby="error-title" hidden>
+        <div class="error-heading">
+          <div>
+            <span class="step error-step">!</span>
+            <h2 id="error-title">実行エラー</h2>
+          </div>
+          <button id="clear-error" type="button">閉じる</button>
+        </div>
+        <pre id="error-output"></pre>
+      </section>
+
+      <footer>
+        <span>Three.jsとFFmpeg.wasmをブラウザ内で実行</span>
+        <span>映像のみ・音声トラックなし</span>
+      </footer>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
