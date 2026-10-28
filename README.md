@@ -42,6 +42,8 @@ globalThis.setRenderSize = async (width, height) => {
 };
 ```
 
+以前のコードに`setRenderSize()`がなくても、トップレベルの変数名が`renderer`と`camera`なら自動的に補完します。確実な書き出しのため、新しいコードでは上記2関数を明示的に定義してください。
+
 プレビュー中は`renderAt()`が実時間で呼ばれます。MP4書き出し中はプレビューを停止し、フレーム`i`ごとに`renderAt(i / fps)`を呼んでPNGを生成します。
 
 ## MP4書き出し
