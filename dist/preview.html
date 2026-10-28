@@ -17,6 +17,17 @@
     <script>
       document.documentElement.dataset.runtime = "loaded";
       const THREE_MODULE_URL = "/vendor/three/build/three.module.min.js";
+      const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+      const nativeCancelAnimationFrame = window.cancelAnimationFrame.bind(window);
+      let blockedAnimationFrameCalls = 0;
+
+      // The host owns the render loop. User-owned RAF loops would advance state at
+      // the display refresh rate during preview but at a different rate while exporting.
+      window.requestAnimationFrame = () => {
+        blockedAnimationFrameCalls += 1;
+        return -blockedAnimationFrameCalls;
+      };
+      window.cancelAnimationFrame = () => {};
 
       let runId = 0;
       let initialized = false;
@@ -25,6 +36,8 @@
       let rendering = false;
       let previewFailed = false;
       let previewStartedAt = performance.now();
+      let previewFps = 30;
+      let lastPreviewFrameAt = 0;
       let previewWidth = 720;
       let previewHeight = 1280;
       let exportWidth = 0;
@@ -100,7 +113,7 @@
           settled = true;
           resolve();
         };
-        requestAnimationFrame(finish);
+        nativeRequestAnimationFrame(finish);
         setTimeout(finish, 50);
       });
 
@@ -146,8 +159,11 @@
       }
 
       async function renderPreview(now) {
-        requestAnimationFrame(renderPreview);
+        nativeRequestAnimationFrame(renderPreview);
         if (!initialized || exporting || rendering || previewFailed) return;
+        const frameInterval = 1000 / previewFps;
+        if (now - lastPreviewFrameAt < frameInterval - 1) return;
+        lastPreviewFrameAt = now - ((now - lastPreviewFrameAt) % frameInterval);
         rendering = true;
         try {
           await globalThis.renderAt((now - previewStartedAt) / 1000);
@@ -163,9 +179,10 @@
         while (rendering) await nextPaint();
       }
 
-      async function initialize(code, width, height) {
+      async function initialize(code, width, height, fps) {
         previewWidth = width;
         previewHeight = height;
+        previewFps = fps === 24 ? 24 : 30;
         document.documentElement.dataset.stage = "importing-three";
         const threeModule = await import(THREE_MODULE_URL);
         document.documentElement.dataset.stage = "three-loaded";
@@ -201,6 +218,7 @@
         initialized = true;
         document.documentElement.dataset.stage = "initialized";
         previewStartedAt = performance.now();
+        lastPreviewFrameAt = previewStartedAt;
         send("ready");
       }
 
@@ -214,7 +232,7 @@
           runId = data.runId;
           initializing = true;
           try {
-            await initialize(data.code, data.width, data.height);
+            await initialize(data.code, data.width, data.height, data.fps);
           } catch (error) {
             send("error", { message: describe(error) });
           } finally {
@@ -224,6 +242,11 @@
         }
 
         if (!initialized || data.runId !== runId) return;
+
+        if (data.type === "preview-fps") {
+          previewFps = data.fps === 24 ? 24 : 30;
+          lastPreviewFrameAt = performance.now();
+        }
 
         if (data.type === "preview-resize") {
           try {
@@ -273,6 +296,7 @@
             await resizeRenderer(previewWidth, previewHeight);
             await globalThis.renderAt(0);
             previewStartedAt = performance.now();
+            lastPreviewFrameAt = previewStartedAt;
             previewFailed = false;
             send("export-ended", { width: previewWidth, height: previewHeight });
           } catch (error) {
@@ -285,7 +309,7 @@
         }
       });
 
-      requestAnimationFrame(renderPreview);
+      nativeRequestAnimationFrame(renderPreview);
       document.documentElement.dataset.runtime = "ready";
       send("runtime-ready");
     </script>

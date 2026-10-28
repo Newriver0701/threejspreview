@@ -73,6 +73,11 @@ function getPreviewSize() {
   return parseSize(previewResolutionSelect.value);
 }
 
+function getSelectedExportFrameRate() {
+  const fps = Number(resolutionSelect.value.split("@")[1]);
+  return fps === 24 ? 24 : 30;
+}
+
 function updatePreviewViewport() {
   const { width, height } = getPreviewSize();
   frame.parentElement.style.setProperty("--preview-ratio", String(width / height));
@@ -120,7 +125,7 @@ function runCode() {
   const sendInitialization = () => {
     if (currentRunId === runId) {
       frame.dataset.initSent = String(Number(frame.dataset.initSent || 0) + 1);
-      postToPreview("initialize", { code: editor.value, ...getPreviewSize() });
+      postToPreview("initialize", { code: editor.value, ...getPreviewSize(), fps: getSelectedExportFrameRate() });
     }
   };
   setTimeout(sendInitialization, 250);
@@ -361,7 +366,7 @@ window.addEventListener("message", (event) => {
   if (event.source !== frame.contentWindow || data?.source !== "three-preview") return;
 
   if (data.type === "runtime-ready") {
-    postToPreview("initialize", { code: editor.value, ...getPreviewSize() });
+    postToPreview("initialize", { code: editor.value, ...getPreviewSize(), fps: getSelectedExportFrameRate() });
     return;
   }
 
@@ -399,6 +404,9 @@ exportButton.addEventListener("click", runMp4Export);
 previewResolutionSelect.addEventListener("change", resizePreview);
 resolutionSelect.addEventListener("change", () => {
   localStorage.setItem("three-export-resolution", resolutionSelect.value);
+  if (previewReady && !exporting) {
+    postToPreview("preview-fps", { fps: getSelectedExportFrameRate() });
+  }
 });
 
 editor.addEventListener("keydown", (event) => {
