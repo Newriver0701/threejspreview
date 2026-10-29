@@ -22,7 +22,11 @@ npm start
 3. RailwayのHealthcheck Pathを`/health`に設定します。
 4. 生成されたドメインを開きます。
 
-Railpack版ではBuilderを`RAILPACK`、Build CommandとStart Commandを空欄にしてください。Variablesの追加は不要です。`HOST`や`PORT`も手動設定する必要はありません。サーバーは`0.0.0.0`とRailwayが注入する`PORT`で待ち受けます。
+Railpack版ではBuilderを`RAILPACK`、Build CommandとStart Commandを空欄にしてください。`HOST`や`PORT`は手動設定不要です。サーバーは`0.0.0.0`とRailwayが注入する`PORT`で待ち受けます。
+
+作品保存と画像アップロードにはRailway PostgreSQLをサービスに追加し、アプリへ`DATABASE_URL=${{Postgres.DATABASE_URL}}`を設定してください。DBテーブルは起動時に作成されます。作品はURLを知る人なら誰でも閲覧・編集・削除できます。
+
+画像候補は`TextureLoader.load("画像URL")`、`img.src = "画像URL"`、埋め込み`data:image`などの文字列から検出します。自動検出できない場合は、`// @image-slot: カード画像`の次の行に画像URL文字列を置いてください。アップロードはPNG・JPEG・WebP、1枚5MBまでです。作品名を付けて保存すると編集がPostgreSQLへ自動保存され、一覧から開けます。未保存の下書きはブラウザにも保存されます。
 
 ### sandboxについて
 

@@ -1,6 +1,7 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const { initializeStore, handleApi, pool } = require("./store");
 
 const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 4173);
@@ -57,7 +58,8 @@ function serveFile(request, response, requestedFile) {
     response.writeHead(200, {
       "Content-Type": contentType,
       "Content-Length": stats.size,
-      "Cache-Control": "no-cache"
+      "Cache-Control": "no-cache",
+      ...(request.url.startsWith("/vendor/") ? { "Access-Control-Allow-Origin": "*" } : {})
     });
 
     if (request.method === "HEAD") {
@@ -74,7 +76,7 @@ function serveFile(request, response, requestedFile) {
 const server = http.createServer((request, response) => {
   setIsolationHeaders(response);
 
-  if (request.method !== "GET" && request.method !== "HEAD") {
+  if (request.method !== "GET" && request.method !== "HEAD" && !request.url.startsWith("/api/")) {
     response.writeHead(405, { Allow: "GET, HEAD" });
     response.end("Method Not Allowed");
     return;
@@ -99,6 +101,18 @@ const server = http.createServer((request, response) => {
     return;
   }
 
+  if (pathname.startsWith("/api/")) {
+    const origin = request.headers.origin;
+    if (!["GET", "HEAD", "OPTIONS"].includes(request.method) &&
+        (origin === "null" || (origin && origin !== `https://${request.headers.host}` && origin !== `http://${request.headers.host}`))) {
+      response.writeHead(403);
+      response.end("Forbidden");
+      return;
+    }
+    handleApi(request, response, pathname);
+    return;
+  }
+
   const requestedFile = getRequestedFile(pathname);
   if (!requestedFile) {
     response.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
@@ -109,8 +123,11 @@ const server = http.createServer((request, response) => {
   serveFile(request, response, requestedFile);
 });
 
-server.listen(PORT, HOST, () => {
+initializeStore().then(() => server.listen(PORT, HOST, () => {
   console.log(`Three.js Preview listening on ${HOST}:${PORT}`);
+})).catch((error) => {
+  console.error("PostgreSQL initialization failed:", error);
+  process.exitCode = 1;
 });
 
 function closeServer() {
@@ -118,7 +135,7 @@ function closeServer() {
     process.exit(0);
     return;
   }
-  server.close(() => process.exit(0));
+  server.close(async () => { await pool?.end(); process.exit(0); });
   setTimeout(() => process.exit(0), 5_000).unref();
 }
 
