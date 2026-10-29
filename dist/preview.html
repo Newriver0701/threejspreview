@@ -43,6 +43,13 @@
       let exportWidth = 0;
       let exportHeight = 0;
       const trackedThree = { renderer: null, camera: null };
+      let activeTextures = new Map();
+      let assetOverrides = {};
+      let candidateSignature = "";
+      const imageCache = new Map();
+      const originalTextures = new Map();
+      const replacementTextures = new Map();
+      const pendingImages = new Set();
       const normalizedCanvas = document.createElement("canvas");
 
       const send = (type, payload = {}) => {
@@ -67,9 +74,82 @@
         renderer.render = function (scene, camera) {
           trackedThree.renderer = this;
           trackedThree.camera = camera;
+          inspectTextures(scene);
           return originalRender.call(this, scene, camera);
         };
         return renderer;
+      }
+
+      function inspectTextures(scene) {
+        const textures = new Map();
+        const visible = [];
+        let objectIndex = 0;
+        scene.traverse((object) => {
+          if (!object.material) return;
+          const index = objectIndex++;
+          const materials = Array.isArray(object.material) ? object.material : [object.material];
+          materials.forEach((material, materialIndex) => {
+            for (const slot of ["map", "emissiveMap", "alphaMap", "normalMap", "bumpMap", "roughnessMap"]) {
+              const texture = material?.[slot];
+              if (!texture?.isTexture) continue;
+              const key = `${index}:${materialIndex}:${slot}`;
+              if (texture !== replacementTextures.get(key)?.texture) originalTextures.set(key, texture);
+              const original = originalTextures.get(key);
+              textures.set(key, { material, slot, original });
+              if (assetOverrides[key]) applyTextureOverride(key, textures.get(key), assetOverrides[key]);
+              const source = original.image;
+              let thumbnail = source?.src?.startsWith("http") ? source.src : "";
+              if (!thumbnail && source?.width && source?.height && !candidateSignature.includes(`${key}|`)) {
+                try {
+                  const thumb = document.createElement("canvas");
+                  thumb.width = 96;
+                  thumb.height = 96;
+                  thumb.getContext("2d").drawImage(source, 0, 0, 96, 96);
+                  thumbnail = thumb.toDataURL("image/png");
+                } catch { /* The source may not be readable as a canvas. */ }
+              }
+              visible.push({ key, label: `${object.name || `オブジェクト ${index + 1}`} / ${slot}`, thumbnail });
+            }
+          });
+        });
+        activeTextures = textures;
+        const signature = visible.map((item) => `${item.key}|`).join("");
+        if (signature !== candidateSignature) {
+          candidateSignature = signature;
+          send("texture-candidates", { candidates: visible });
+        }
+      }
+
+      function applyTextureOverride(key, target, url) {
+        const previous = replacementTextures.get(key);
+        if (previous?.url === url) {
+          if (target.material[target.slot] !== previous.texture) target.material[target.slot] = previous.texture;
+          return;
+        }
+        let image = imageCache.get(url);
+        if (!image) {
+          image = new Image();
+          image.crossOrigin = "anonymous";
+          image.src = url;
+          imageCache.set(url, image);
+        }
+        if (image.complete && image.naturalWidth) {
+          previous?.texture.dispose();
+          const replacement = target.original.clone();
+          replacement.source = new globalThis.THREE.Source(image);
+          replacement.needsUpdate = true;
+          target.material[target.slot] = replacement;
+          replacementTextures.set(key, { url, texture: replacement });
+        } else {
+          const pendingKey = `${key}:${url}`;
+          if (!pendingImages.has(pendingKey)) {
+            pendingImages.add(pendingKey);
+            image.addEventListener("load", () => {
+              pendingImages.delete(pendingKey);
+              applyTextureOverride(key, activeTextures.get(key) || target, url);
+            }, { once: true });
+          }
+        }
       }
 
       function createTrackedThree(module) {
@@ -179,10 +259,11 @@
         while (rendering) await nextPaint();
       }
 
-      async function initialize(code, width, height, fps) {
+      async function initialize(code, width, height, fps, overrides) {
         previewWidth = width;
         previewHeight = height;
         previewFps = fps === 24 ? 24 : 30;
+        assetOverrides = overrides || {};
         document.documentElement.dataset.stage = "importing-three";
         const threeModule = await import(THREE_MODULE_URL);
         document.documentElement.dataset.stage = "three-loaded";
@@ -232,7 +313,7 @@
           runId = data.runId;
           initializing = true;
           try {
-            await initialize(data.code, data.width, data.height, data.fps);
+            await initialize(data.code, data.width, data.height, data.fps, data.overrides);
           } catch (error) {
             send("error", { message: describe(error) });
           } finally {
@@ -242,6 +323,12 @@
         }
 
         if (!initialized || data.runId !== runId) return;
+
+        if (data.type === "asset-override") {
+          assetOverrides[data.key] = data.url;
+          const target = activeTextures.get(data.key);
+          if (target) applyTextureOverride(data.key, target, data.url);
+        }
 
         if (data.type === "preview-fps") {
           previewFps = data.fps === 24 ? 24 : 30;

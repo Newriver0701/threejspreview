@@ -111,6 +111,7 @@ function runCode() {
   clearError();
   runId += 1;
   previewReady = false;
+  updateRuntimeCandidates([]);
   persistDraft();
   exportButton.disabled = true;
   previewResolutionSelect.disabled = true;
@@ -125,7 +126,7 @@ function runCode() {
   const sendInitialization = () => {
     if (currentRunId === runId) {
       frame.dataset.initSent = String(Number(frame.dataset.initSent || 0) + 1);
-      postToPreview("initialize", { code: editor.value, ...getPreviewSize(), fps: getSelectedExportFrameRate() });
+      postToPreview("initialize", { code: editor.value, ...getPreviewSize(), fps: getSelectedExportFrameRate(), overrides: getImageOverrides() });
     }
   };
   setTimeout(sendInitialization, 250);
@@ -366,7 +367,7 @@ window.addEventListener("message", (event) => {
   if (event.source !== frame.contentWindow || data?.source !== "three-preview") return;
 
   if (data.type === "runtime-ready") {
-    postToPreview("initialize", { code: editor.value, ...getPreviewSize(), fps: getSelectedExportFrameRate() });
+    postToPreview("initialize", { code: editor.value, ...getPreviewSize(), fps: getSelectedExportFrameRate(), overrides: getImageOverrides() });
     return;
   }
 
@@ -378,6 +379,8 @@ window.addEventListener("message", (event) => {
     setStatus("running", "実行中");
     exportButton.disabled = false;
   }
+
+  if (data.type === "texture-candidates") updateRuntimeCandidates(data.candidates);
 
   if (data.type === "error" || data.type === "console-error") {
     previewResolutionSelect.disabled = false;

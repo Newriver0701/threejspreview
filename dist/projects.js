@@ -5,6 +5,15 @@ const candidates = document.querySelector("#asset-candidates");
 let activeProjectId = localStorage.getItem("three-preview-project-id") || "";
 let saveTimer;
 let saveQueue = Promise.resolve();
+let imageOverrides = JSON.parse(localStorage.getItem("three-preview-image-overrides") || "{}");
+let runtimeCandidates = [];
+
+function getImageOverrides() { return imageOverrides; }
+
+function updateRuntimeCandidates(items) {
+  runtimeCandidates = Array.isArray(items) ? items : [];
+  renderCandidates();
+}
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -24,7 +33,7 @@ function persistDraft() {
       return;
     }
     const id = activeProjectId;
-    const payload = JSON.stringify({ name: projectName.value, code: editor.value });
+    const payload = JSON.stringify({ name: projectName.value, code: editor.value, overrides: imageOverrides });
     saveQueue = saveQueue.then(async () => {
       await api(`/api/projects/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: payload });
       saveStatus.textContent = "自動保存済み";
@@ -63,11 +72,42 @@ function imageReferences(code) {
 function renderCandidates() {
   candidates.replaceChildren();
   const references = imageReferences(editor.value);
-  if (!references.length) {
+  if (!references.length && !runtimeCandidates.length) {
     const empty = document.createElement("p");
-    empty.textContent = "画像参照が見つかりません。コードに // @image-slot: カード画像 を追加できます。";
+    empty.textContent = previewReady ? "このシーンに差し替え可能な画像はありません。" : "コードを実行すると画像候補が表示されます。";
     candidates.append(empty);
     return;
+  }
+  for (const item of runtimeCandidates) {
+    const row = document.createElement("div");
+    row.className = "asset-row";
+    const img = document.createElement("img");
+    img.alt = item.label;
+    img.src = imageOverrides[item.key] || item.thumbnail || "";
+    img.onerror = () => { img.hidden = true; };
+    const label = document.createElement("span");
+    label.textContent = item.label;
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/webp";
+    input.setAttribute("aria-label", `${item.label}を差し替える`);
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      if (file.size > 5 * 1024 * 1024) { showError("画像は1枚5MBまでです。"); return; }
+      try {
+        input.disabled = true;
+        const stored = await api("/api/assets", { method: "POST", headers: { "Content-Type": file.type }, body: file });
+        imageOverrides[item.key] = stored.url;
+        localStorage.setItem("three-preview-image-overrides", JSON.stringify(imageOverrides));
+        postToPreview("asset-override", { key: item.key, url: stored.url });
+        persistDraft();
+        renderCandidates();
+      } catch (error) { showError(error.message); }
+      finally { input.disabled = false; }
+    };
+    row.append(img, label, input);
+    candidates.append(row);
   }
   for (const reference of references) {
     const row = document.createElement("div");
@@ -119,7 +159,7 @@ async function openProject(id) {
   if (activeProjectId && activeProjectId !== id) {
     clearTimeout(saveTimer);
     const previousId = activeProjectId;
-    const previous = JSON.stringify({ name: projectName.value, code: editor.value });
+    const previous = JSON.stringify({ name: projectName.value, code: editor.value, overrides: imageOverrides });
     await saveQueue;
     await api(`/api/projects/${previousId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: previous });
   }
@@ -130,6 +170,8 @@ async function openProject(id) {
   localStorage.setItem("three-preview-project-id", id);
   projectName.value = project.name;
   editor.value = project.code;
+  imageOverrides = project.image_overrides || {};
+  localStorage.setItem("three-preview-image-overrides", JSON.stringify(imageOverrides));
   localStorage.setItem("three-preview-draft", editor.value);
   renderCandidates();
   saveStatus.textContent = "作品を読み込みました";
@@ -140,7 +182,7 @@ async function createProject(name = projectName.value) {
   clearTimeout(saveTimer);
   await saveQueue;
   const project = await api("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, code: editor.value }) });
+    body: JSON.stringify({ name, code: editor.value, overrides: imageOverrides }) });
   activeProjectId = project.id;
   localStorage.setItem("three-preview-project-id", project.id);
   projectName.value = project.name;
