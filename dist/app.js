@@ -33,6 +33,10 @@ const editor = document.querySelector("#code-editor");
 const runButton = document.querySelector("#run-button");
 const resetButton = document.querySelector("#reset-button");
 const frame = document.querySelector("#preview-frame");
+const previewViewport = document.querySelector("#preview-viewport");
+const previewPlayToggle = document.querySelector("#preview-play-toggle");
+const previewTimeline = document.querySelector("#preview-timeline");
+const previewTimeLabel = document.querySelector("#preview-time-label");
 const emptyState = document.querySelector("#empty-state");
 const status = document.querySelector("#status");
 const errorPanel = document.querySelector("#error-panel");
@@ -50,6 +54,7 @@ const exportLabel = document.querySelector("#export-label");
 const exportProgress = document.querySelector("#export-progress");
 const exportProgressBar = document.querySelector("#export-progress-bar");
 const exportProgressText = document.querySelector("#export-progress-text");
+const exportCancelButton = document.querySelector("#export-cancel");
 
 let runId = 0;
 let exporting = false;
@@ -57,7 +62,10 @@ let previewReady = false;
 let resizingPreview = false;
 let ffmpegInstance = null;
 let ffmpegFetchFile = null;
+let lastFfmpegLog = "";
 let frameRequestId = 0;
+let exportCancelRequested = false;
+let previewPaused = false;
 let detectedDuration = null;
 const pendingFrameRequests = new Map();
 
@@ -73,10 +81,22 @@ function updateDurationControls() {
   if (automatic) {
     durationAutoNote.textContent = detectedDuration === null
       ? "終了時刻を取得できません。JSに globalThis.exportDurationSeconds を指定してください。"
-      : detectedDuration > 60
-        ? `JSの終了時刻: ${detectedDuration}秒（書き出し上限は60秒です）`
+      : detectedDuration > 600
+        ? `JSの終了時刻: ${detectedDuration}秒（書き出し上限は600秒です）`
         : `JSの終了時刻: ${detectedDuration}秒`;
   }
+  const timelineDuration = automatic ? detectedDuration : Number(durationInput.value);
+  previewTimeline.max = String(Number.isFinite(timelineDuration) && timelineDuration >= 1 ? Math.min(600, timelineDuration) : 10);
+  updateTimelineLabel(Number(previewTimeline.value) || 0);
+}
+
+function formatTime(seconds) {
+  const whole = Math.floor(Math.max(0, seconds));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+function updateTimelineLabel(seconds) {
+  previewTimeLabel.textContent = `${formatTime(seconds)} / ${formatTime(Number(previewTimeline.max))}`;
 }
 
 updateDurationControls();
@@ -95,16 +115,20 @@ function getPreviewSize() {
 
 function getSelectedExportFrameRate() {
   const fps = Number(resolutionSelect.value.split("@")[1]);
-  return fps === 24 ? 24 : 30;
+  return [24, 30, 60].includes(fps) ? fps : 30;
 }
 
 function updatePreviewViewport() {
   const { width, height } = getPreviewSize();
-  frame.parentElement.style.setProperty("--preview-ratio", String(width / height));
+  previewViewport.style.setProperty("--preview-ratio", String(width / height));
+  frame.style.width = `${width}px`;
+  frame.style.height = `${height}px`;
+  frame.style.transform = `scale(${previewViewport.clientWidth / width || 1})`;
   frame.setAttribute("aria-label", `プレビュー ${width} × ${height}`);
 }
 
 updatePreviewViewport();
+new ResizeObserver(updatePreviewViewport).observe(previewViewport);
 
 function setStatus(kind, label) {
   status.className = `status ${kind || ""}`.trim();
@@ -112,7 +136,7 @@ function setStatus(kind, label) {
 }
 
 function showError(message) {
-  errorOutput.textContent = message || "不明なエラーが発生しました。";
+  errorOutput.textContent = message || "処理が停止しました。端末のメモリ不足の可能性があります。解像度を下げて再試行してください。";
   errorPanel.hidden = false;
   setStatus("error", "エラー");
 }
@@ -131,6 +155,11 @@ function runCode() {
   clearError();
   runId += 1;
   previewReady = false;
+  previewPaused = false;
+  previewPlayToggle.textContent = "一時停止";
+  previewPlayToggle.disabled = true;
+  previewTimeline.disabled = true;
+  previewTimeline.value = "0";
   detectedDuration = null;
   updateDurationControls();
   updateRuntimeCandidates([]);
@@ -208,10 +237,10 @@ function getExportSettings() {
     if (detectedDuration === null) {
       throw new Error("JSの終了時刻を取得できません。globalThis.exportDurationSeconds = 秒数 を指定するか、手動で秒数を入力してください。");
     }
-    if (detectedDuration > 60) throw new Error("JSの終了時刻が60秒を超えています。現在の書き出し上限は60秒です。");
+    if (detectedDuration > 600) throw new Error("JSの終了時刻が600秒を超えています。現在の書き出し上限は600秒です。");
     duration = detectedDuration;
   } else {
-    duration = Math.max(1, Math.min(60, Number(durationInput.value) || 10));
+    duration = Math.max(1, Math.min(600, Number(durationInput.value) || 10));
     durationInput.value = String(duration);
   }
   const quality = {
@@ -264,12 +293,7 @@ async function getFfmpeg() {
   ]);
 
   const ffmpeg = new FFmpeg();
-  ffmpeg.on("progress", ({ progress }) => {
-    if (!exporting || !Number.isFinite(progress)) return;
-    exportProgressBar.value = 0.8 + Math.max(0, Math.min(1, progress)) * 0.2;
-    exportProgressText.textContent = `H.264 MP4へ変換中… ${Math.round(progress * 100)}%`;
-  });
-
+  ffmpeg.on("log", ({ message }) => { if (message) lastFfmpegLog = String(message).slice(-400); });
   await ffmpeg.load({
     workerURL: "/vendor/@ffmpeg/ffmpeg/dist/esm/worker.js",
     coreURL: "/vendor/@ffmpeg/core/dist/esm/ffmpeg-core.js",
@@ -279,6 +303,12 @@ async function getFfmpeg() {
   ffmpegInstance = ffmpeg;
   ffmpegFetchFile = fetchFile;
   return { ffmpeg, fetchFile };
+}
+
+function releaseFfmpeg() {
+  ffmpegInstance?.terminate();
+  ffmpegInstance = null;
+  ffmpegFetchFile = null;
 }
 
 function downloadBlob(blob, filename) {
@@ -303,23 +333,32 @@ function byteArrayContainsAscii(bytes, text) {
 async function runMp4Export() {
   if (exporting) return;
   exporting = true;
+  exportCancelRequested = false;
+  exportCancelButton.disabled = false;
   clearError();
   exportButton.disabled = true;
   runButton.disabled = true;
   resetButton.disabled = true;
   previewResolutionSelect.disabled = true;
   resolutionSelect.disabled = true;
+  previewPlayToggle.disabled = true;
+  previewTimeline.disabled = true;
   durationModeSelect.disabled = true;
   durationInput.disabled = true;
   exportLabel.textContent = "書き出し中…";
 
-  const writtenFrames = [];
+  const temporaryFiles = new Set();
+  let writtenFrameCount = 0;
+  let failedFrameDeletes = 0;
   let previewExportStarted = false;
+  let activeChunk = 0;
+  let exportSucceeded = false;
+  lastFfmpegLog = "";
 
   try {
     const settings = getExportSettings();
     const frameCount = Math.round(settings.duration * settings.fps);
-    const { ffmpeg, fetchFile } = await getFfmpeg();
+    let { ffmpeg, fetchFile } = await getFfmpeg();
 
     setExportProgress(0, "書き出し解像度を準備中…");
     const readyPromise = waitForPreview("export-ready", "export-error");
@@ -327,30 +366,72 @@ async function runMp4Export() {
     await readyPromise;
     previewExportStarted = true;
 
-    for (let index = 0; index < frameCount; index += 1) {
-      const frameData = await requestPngFrame(index / settings.fps);
-      if (frameData.width !== settings.width || frameData.height !== settings.height) {
-        throw new Error(`PNGの解像度が一致しません（${frameData.width}×${frameData.height}）。`);
+    const framesPerSegment = settings.fps * 10;
+    const segments = [];
+    for (let start = 0; start < frameCount; start += framesPerSegment) {
+      activeChunk = segments.length + 1;
+      const framesThisSegment = Math.min(framesPerSegment, frameCount - start);
+      const currentFrames = [];
+      for (let localIndex = 0; localIndex < framesThisSegment; localIndex += 1) {
+        if (exportCancelRequested) throw new Error("書き出しを中断しました。");
+        const index = start + localIndex;
+        const frameData = await requestPngFrame(index / settings.fps);
+        if (frameData.width !== settings.width || frameData.height !== settings.height) {
+          throw new Error(`PNGの解像度が一致しません（${frameData.width}×${frameData.height}）。`);
+        }
+        const filename = `frame_${String(localIndex + 1).padStart(6, "0")}.png`;
+        temporaryFiles.add(filename);
+        await ffmpeg.writeFile(filename, await fetchFile(frameData.blob));
+        currentFrames.push(filename);
+        writtenFrameCount += 1;
+        setExportProgress(((index + 1) / frameCount) * 0.9, `10秒区間 ${activeChunk}: PNG ${localIndex + 1} / ${framesThisSegment}`);
       }
-      const filename = `frame_${String(index + 1).padStart(6, "0")}.png`;
-      await ffmpeg.writeFile(filename, await fetchFile(frameData.blob));
-      writtenFrames.push(filename);
-      setExportProgress(((index + 1) / frameCount) * 0.8, `PNG生成 ${index + 1} / ${frameCount}`);
+
+      const segmentName = `segment_${String(segments.length).padStart(4, "0")}.ts`;
+      temporaryFiles.add(segmentName);
+      setExportProgress(((start + framesThisSegment) / frameCount) * 0.9, `10秒区間 ${activeChunk} を変換中…`);
+      const segmentExit = await ffmpeg.exec([
+        "-framerate", String(settings.fps), "-start_number", "1", "-i", "frame_%06d.png",
+        "-frames:v", String(framesThisSegment), "-c:v", "libx264",
+        "-preset", settings.preset, "-crf", settings.crf,
+        "-pix_fmt", "yuv420p", "-f", "mpegts", segmentName
+      ]);
+      if (segmentExit !== 0) throw new Error(`区間の変換に失敗しました（終了コード: ${segmentExit}）。`);
+      const bytes = await ffmpeg.readFile(segmentName);
+      segments.push({ name: segmentName, bytes });
+      const cleanup = await Promise.allSettled(currentFrames.map((name) => ffmpeg.deleteFile(name)));
+      cleanup.forEach((result, index) => {
+        if (result.status === "fulfilled") temporaryFiles.delete(currentFrames[index]);
+        else failedFrameDeletes += 1;
+      });
+      if (failedFrameDeletes) throw new Error("PNG一時ファイルの削除に失敗しました。書き出しを停止します。");
+      await ffmpeg.deleteFile(segmentName);
+      temporaryFiles.delete(segmentName);
+      releaseFfmpeg();
+      temporaryFiles.clear();
+      setExportProgress(((start + framesThisSegment) / frameCount) * 0.9, `10秒区間 ${activeChunk} を確定しました`);
+      if (start + framesThisSegment < frameCount) {
+        ({ ffmpeg, fetchFile } = await getFfmpeg());
+      }
     }
 
-    setExportProgress(0.8, "H.264 MP4へ変換中…");
+    if (exportCancelRequested) throw new Error("書き出しを中断しました。");
+    ({ ffmpeg } = await getFfmpeg());
+    for (const segment of segments) {
+      temporaryFiles.add(segment.name);
+      await ffmpeg.writeFile(segment.name, segment.bytes);
+    }
+    const concatList = segments.map((segment) => `file '${segment.name}'`).join("\n") + "\n";
+    await ffmpeg.writeFile("segments.txt", new TextEncoder().encode(concatList));
+    temporaryFiles.add("segments.txt");
+    setExportProgress(0.95, "区間をMP4に結合中…");
+    temporaryFiles.add("output.mp4");
     const exitCode = await ffmpeg.exec([
-      "-framerate", String(settings.fps),
-      "-start_number", "1",
-      "-i", "frame_%06d.png",
-      "-c:v", "libx264",
-      "-preset", settings.preset,
-      "-crf", settings.crf,
-      "-pix_fmt", "yuv420p",
-      "-movflags", "faststart",
-      "output.mp4"
+      "-f", "concat", "-safe", "0", "-i", "segments.txt",
+      "-c", "copy", "-movflags", "faststart", "output.mp4"
     ]);
-    if (exitCode !== 0) throw new Error(`FFmpegの変換に失敗しました（終了コード: ${exitCode}）。`);
+    if (exitCode !== 0) throw new Error(`MP4の結合に失敗しました（終了コード: ${exitCode}）。`);
+    if (exportCancelRequested) throw new Error("書き出しを中断しました。");
 
     const data = await ffmpeg.readFile("output.mp4");
     const blob = new Blob([data], { type: "video/mp4" });
@@ -361,10 +442,19 @@ async function runMp4Export() {
     };
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     downloadBlob(blob, `three-preview-${timestamp}.mp4`);
+    exportSucceeded = true;
     setExportProgress(1, "MP4を保存しました");
     setStatus("running", "MP4を保存しました");
   } catch (error) {
-    showError(error.stack || error.message);
+    if (exportCancelRequested && error?.message === "書き出しを中断しました。") {
+      setStatus("", "書き出しを中断しました");
+      setExportProgress(0, "中断しました");
+    } else {
+      const detail = error?.stack || error?.message || (typeof error === "string" ? error : "");
+      const location = activeChunk ? `10秒区間 ${activeChunk} の処理中に停止しました。` : "書き出しが停止しました。";
+      const advice = "端末のメモリ不足の可能性があります。解像度または画質を下げて再試行してください。";
+      showError([location, detail || advice, lastFfmpegLog ? `FFmpeg: ${lastFfmpegLog}` : ""].filter(Boolean).join("\n"));
+    }
   } finally {
     if (previewExportStarted) {
       try {
@@ -375,24 +465,29 @@ async function runMp4Export() {
         showError(error.message);
       }
     }
-    if (ffmpegInstance) {
-      const frameCleanup = await Promise.allSettled(writtenFrames.map((filename) => ffmpegInstance.deleteFile(filename)));
-      let outputDeleted = true;
-      await ffmpegInstance.deleteFile("output.mp4").catch(() => { outputDeleted = false; });
-      globalThis.__THREE_PREVIEW_LAST_CLEANUP__ = {
-        frames: writtenFrames.length,
-        failedFrameDeletes: frameCleanup.filter((result) => result.status === "rejected").length,
-        outputDeleted
-      };
+    if (ffmpegInstance && exportSucceeded) {
+      const names = [...temporaryFiles];
+      const cleanup = await Promise.allSettled(names.map((name) => ffmpegInstance.deleteFile(name)));
+      failedFrameDeletes += cleanup.filter((result, index) => names[index].endsWith(".png") && result.status === "rejected").length;
     }
+    releaseFfmpeg();
+    temporaryFiles.clear();
+    globalThis.__THREE_PREVIEW_LAST_CLEANUP__ = {
+      frames: writtenFrameCount,
+      failedFrameDeletes,
+      outputDeleted: true
+    };
     exporting = false;
     exportButton.disabled = false;
     runButton.disabled = false;
     resetButton.disabled = false;
     previewResolutionSelect.disabled = false;
     resolutionSelect.disabled = false;
+    previewPlayToggle.disabled = !previewReady;
+    previewTimeline.disabled = !previewReady;
     durationModeSelect.disabled = false;
     durationInput.disabled = false;
+    exportCancelButton.disabled = true;
     exportLabel.textContent = "MP4を書き出す";
   }
 }
@@ -412,12 +507,22 @@ window.addEventListener("message", (event) => {
     detectedDuration = Number.isFinite(data.duration) && data.duration >= 1 ? data.duration : null;
     updateDurationControls();
     previewReady = true;
+    previewPlayToggle.disabled = false;
+    previewTimeline.disabled = false;
     previewResolutionSelect.disabled = false;
     setStatus("running", "実行中");
     exportButton.disabled = false;
   }
 
   if (data.type === "texture-candidates") updateRuntimeCandidates(data.candidates);
+
+  if (data.type === "preview-time" && !previewPaused && !exporting) {
+    const time = Math.min(Number(previewTimeline.max), data.timeSeconds);
+    previewTimeline.value = String(time);
+    updateTimelineLabel(time);
+  }
+
+  if (data.type === "preview-seeked") updateTimelineLabel(data.timeSeconds);
 
   if (data.type === "error" || data.type === "console-error") {
     previewResolutionSelect.disabled = false;
@@ -451,6 +556,25 @@ resolutionSelect.addEventListener("change", () => {
 durationModeSelect.addEventListener("change", () => {
   localStorage.setItem("three-export-duration-mode", durationModeSelect.value);
   updateDurationControls();
+});
+durationInput.addEventListener("input", updateDurationControls);
+previewPlayToggle.addEventListener("click", () => {
+  if (!previewReady || exporting) return;
+  previewPaused = !previewPaused;
+  previewPlayToggle.textContent = previewPaused ? "再生" : "一時停止";
+  postToPreview("preview-play-state", { paused: previewPaused });
+});
+previewTimeline.addEventListener("input", () => {
+  if (!previewReady || exporting) return;
+  previewPaused = true;
+  previewPlayToggle.textContent = "再生";
+  updateTimelineLabel(Number(previewTimeline.value));
+  postToPreview("preview-seek", { timeSeconds: Number(previewTimeline.value) });
+});
+exportCancelButton.addEventListener("click", () => {
+  exportCancelRequested = true;
+  exportCancelButton.disabled = true;
+  exportProgressText.textContent = "中断処理中…";
 });
 
 editor.addEventListener("keydown", (event) => {

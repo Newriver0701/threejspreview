@@ -242,12 +242,19 @@ h2 {
   background: #0c0d0d;
 }
 
-#preview-frame {
-  display: block;
+#preview-viewport {
+  position: relative;
   width: min(100%, calc(var(--preview-height-limit) * var(--preview-ratio)));
-  height: auto;
   max-height: var(--preview-height-limit);
   aspect-ratio: var(--preview-ratio);
+  overflow: hidden;
+}
+
+#preview-frame {
+  position: absolute;
+  inset: 0 auto auto 0;
+  display: block;
+  transform-origin: 0 0;
   border: 0;
   background: #0c0d0d;
 }
@@ -278,6 +285,11 @@ h2 {
   letter-spacing: -.04em;
   transform: rotate(-4deg);
 }
+
+.timeline-controls { display: flex; align-items: center; gap: 10px; padding: 12px 18px; }
+.timeline-controls input { flex: 1; min-width: 0; }
+.timeline-controls button { padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.timeline-controls span { min-width: 95px; text-align: right; font-size: 12px; color: var(--muted); }
 
 .export-panel {
   border-top: 1px solid var(--line);
@@ -354,7 +366,7 @@ h2 {
 
 .export-progress {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 14px;
   padding: 14px 18px;
