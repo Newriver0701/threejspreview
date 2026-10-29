@@ -7,8 +7,10 @@ async function initializeStore() {
   if (!pool) return;
   await pool.query(`CREATE TABLE IF NOT EXISTS projects (
     id uuid PRIMARY KEY, name varchar(120) NOT NULL, code text NOT NULL,
+    image_overrides jsonb NOT NULL DEFAULT '{}'::jsonb,
     updated_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now()
   )`);
+  await pool.query("ALTER TABLE projects ADD COLUMN IF NOT EXISTS image_overrides jsonb NOT NULL DEFAULT '{}'::jsonb");
   await pool.query(`CREATE TABLE IF NOT EXISTS assets (
     id uuid PRIMARY KEY, mime varchar(32) NOT NULL, bytes bytea NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
@@ -39,6 +41,16 @@ function readBody(request, limit) {
 
 const isUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 
+function validateOverrides(value) {
+  const result = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+  for (const [key, url] of Object.entries(value).slice(0, 100)) {
+    if (/^\d+:\d+:[a-zA-Z]+$/.test(key) && typeof url === "string" &&
+        /^\/api\/assets\/[0-9a-f-]{36}$/i.test(url)) result[key] = url;
+  }
+  return result;
+}
+
 async function handleApi(request, response, pathname) {
   if (request.method === "OPTIONS") {
     response.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET" });
@@ -55,22 +67,24 @@ async function handleApi(request, response, pathname) {
       const input = JSON.parse((await readBody(request, 1024 * 1024)).toString("utf8"));
       const name = String(input.name || "無題").trim().slice(0, 120);
       const code = String(input.code || "");
+      const overrides = validateOverrides(input.overrides);
       const id = randomUUID();
-      await pool.query("INSERT INTO projects (id, name, code) VALUES ($1,$2,$3)", [id, name, code]);
-      return sendJson(response, 201, { id, name, code });
+      await pool.query("INSERT INTO projects (id, name, code, image_overrides) VALUES ($1,$2,$3,$4)", [id, name, code, overrides]);
+      return sendJson(response, 201, { id, name, code, image_overrides: overrides });
     }
     const project = /^\/api\/projects\/([^/]+)$/.exec(pathname);
     if (project && isUuid(project[1])) {
       const id = project[1];
       if (request.method === "GET") {
-        const result = await pool.query("SELECT id, name, code, updated_at FROM projects WHERE id=$1", [id]);
+        const result = await pool.query("SELECT id, name, code, image_overrides, updated_at FROM projects WHERE id=$1", [id]);
         return sendJson(response, result.rowCount ? 200 : 404, result.rows[0] || { error: "作品が見つかりません。" });
       }
       if (request.method === "PUT") {
         const input = JSON.parse((await readBody(request, 1024 * 1024)).toString("utf8"));
         const name = String(input.name || "無題").trim().slice(0, 120);
         const code = String(input.code || "");
-        const result = await pool.query("UPDATE projects SET name=$2, code=$3, updated_at=now() WHERE id=$1 RETURNING id, name, updated_at", [id, name, code]);
+        const overrides = validateOverrides(input.overrides);
+        const result = await pool.query("UPDATE projects SET name=$2, code=$3, image_overrides=$4, updated_at=now() WHERE id=$1 RETURNING id, name, updated_at", [id, name, code, overrides]);
         return sendJson(response, result.rowCount ? 200 : 404, result.rows[0] || { error: "作品が見つかりません。" });
       }
       if (request.method === "DELETE") {
