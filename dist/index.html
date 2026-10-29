@@ -30,6 +30,27 @@
         <label class="sr-only" for="code-editor">Three.js JavaScriptコード</label>
         <textarea id="code-editor" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
 
+        <div class="project-tools">
+          <input id="project-name" type="text" maxlength="120" value="無題" aria-label="作品名" />
+          <button id="save-project" type="button">名前を付けて保存</button>
+          <button id="duplicate-project" type="button">複製</button>
+          <span id="save-status" role="status">編集中</span>
+        </div>
+        <div class="project-tools">
+          <select id="project-list" aria-label="保存した作品"><option value="">保存した作品を選択</option></select>
+          <button id="open-project" type="button">開く</button>
+          <button id="delete-project" type="button">削除</button>
+        </div>
+        <div id="legacy-import" class="project-tools" hidden>
+          <span>以前のブラウザ保存コードがあります。</span><button id="import-legacy" type="button">取り込む</button>
+        </div>
+
+        <section class="asset-tools" aria-label="画像差し替え">
+          <h3>画像を差し替える</h3>
+          <p>コード中の画像を選んでアップロード。候補が出ない場合は <code>// @image-slot: 名前</code> の次の行に画像URLの文字列を書いてください。</p>
+          <div id="asset-candidates"></div>
+        </section>
+
         <div class="actions">
           <button id="run-button" class="button button-primary" type="button">
             <span class="button-icon" aria-hidden="true">▶</span>
@@ -65,7 +86,7 @@
           <iframe
             id="preview-frame"
             title="Three.jsコードの隔離プレビュー"
-            sandbox="allow-scripts allow-same-origin"
+            sandbox="allow-scripts"
             referrerpolicy="no-referrer"
           ></iframe>
           <div id="empty-state" class="empty-state">
@@ -141,5 +162,6 @@
     </main>
 
     <script src="./app.js"></script>
+    <script src="./projects.js"></script>
   </body>
 </html>

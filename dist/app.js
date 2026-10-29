@@ -57,7 +57,7 @@ let ffmpegFetchFile = null;
 let frameRequestId = 0;
 const pendingFrameRequests = new Map();
 
-editor.value = localStorage.getItem("three-preview-code") || SAMPLE_CODE;
+editor.value = localStorage.getItem("three-preview-draft") || SAMPLE_CODE;
 previewResolutionSelect.value = localStorage.getItem("three-preview-resolution") || "720x1280";
 resolutionSelect.value = localStorage.getItem("three-export-resolution") || "720x1280@30";
 
@@ -111,7 +111,7 @@ function runCode() {
   clearError();
   runId += 1;
   previewReady = false;
-  localStorage.setItem("three-preview-code", editor.value);
+  persistDraft();
   exportButton.disabled = true;
   previewResolutionSelect.disabled = true;
   emptyState.hidden = true;
@@ -396,7 +396,7 @@ window.addEventListener("message", (event) => {
 runButton.addEventListener("click", runCode);
 resetButton.addEventListener("click", () => {
   editor.value = SAMPLE_CODE;
-  localStorage.removeItem("three-preview-code");
+  handleEditorChange();
   editor.focus();
 });
 clearErrorButton.addEventListener("click", clearError);
