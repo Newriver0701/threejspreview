@@ -15,7 +15,7 @@ npm start
 
 ## Railwayへデプロイ
 
-メイン画面とプレビューは1つのドメイン・1つのポートで動作します。`package.json`の`npm start`から起動できるため、Railpack版ではDockerfileや追加のBuild Commandは不要です。Dockerfile版を使う場合は、リポジトリ直下の`Dockerfile`をRailwayに選択させます。どちらも`/health`エンドポイントを利用できます。
+メイン画面とプレビューは1つのドメイン・1つのポートで動作します。`package.json`の`npm start`から起動できるため、RailpackでDockerfileや追加のBuild Commandは不要です。`/health`エンドポイントを利用できます。
 
 1. ZIPの中身をGitHubリポジトリのルートへ配置し、RailwayでNew Serviceから接続します。ZIPを入れ子のフォルダとしてアップロードしないでください。
 2. デプロイ後、Public Networkingでドメインを1つ生成します。
@@ -26,11 +26,35 @@ Railpack版ではBuilderを`RAILPACK`、Build CommandとStart Commandを空欄�
 
 作品保存と画像アップロードにはRailway PostgreSQLをサービスに追加し、アプリへ`DATABASE_URL=${{Postgres.DATABASE_URL}}`を設定してください。DBテーブルは起動時に作成されます。作品はURLを知る人なら誰でも閲覧・編集・削除できます。
 
-画像候補は実行中のThree.jsシーンの画像テクスチャから取得し、コード中の`TextureLoader.load("画像URL")`や`data:image`も補助的に検出します。候補を選んでアップロードするだけで、コードのパス編集なしにプレビューとMP4へ反映されます。アップロードはPNG・JPEG・WebP、1枚5MBまでです。作品名を付けて保存すると編集と画像差し替え設定がPostgreSQLへ自動保存され、一覧から開けます。未保存の下書きはブラウザにも保存されます。
+画像候補はプレビュー内で実際に読み込まれる画像URL・`data:image`・画像用ファイル選択欄から取得します。`new Image().src`、`TextureLoader.load()`、読み込んだ画像をCanvasへ`drawImage()`するコードに対応します。同じURLは1候補にまとめ、コードで生成した傷・凹凸などは一覧に出しません。候補を選んでPNG・JPEG・WebP（1枚5MBまで）をアップロードすると、コードを変更せずにプレビューを再実行して反映します。作品名を付けて保存するとコードと画像の対応がPostgreSQLへ自動保存され、一覧から開けます。未保存の下書きはブラウザにも保存されます。
+
+`examples/arcana-image-slots.js`は提供されたARCANAコードの画像対応版です。コード入力欄をこのファイルの内容に一度だけ入れ替えると、「月のカード」「太陽のカード」「女教皇のカード」「背景」「顔画像」が5件だけ表示されます。以後は画像候補から差し替えられます。
+
+画像を選ぶ前は空の場所や、複数の代替URLが同じ画像枠を指す場合には、コードから画像枠を明示できます。`registerImageSlot()`はプレビュー内だけで動き、サーバーの保存APIにはアクセスしません。
+
+```js
+globalThis.registerImageSlot?.({
+  id: "face",                  // 作品内で変わらない識別子
+  label: "顔画像",
+  ready: assetsReady,           // 任意: 元画像の読み込み完了Promise
+  sources: [originalImageUrl],  // 任意: 同じ枠の代替URLも含める
+  getTexture: () => faceMaterial.map,
+  apply: async (url) => {       // 保存済み画像URLを受け取る
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.src = url;
+    await image.decode();
+    faceMaterial.map = new THREE.Texture(image);
+    faceMaterial.map.needsUpdate = true;
+  }
+});
+```
+
+同じ画像URLを複数箇所で使うコードでは、自動候補からの差し替えは全箇所に反映されます。個別に変えたい箇所には別々の画像枠を登録してください。図形・シェーダー・Canvasの描画命令だけで作った絵は元画像がないため、自動候補にはできません。
 
 ### sandboxについて
 
-1ドメイン構成ではプレビューiframeも親画面と同じオリジンです。sandboxでポップアップやトップ画面遷移などを制限していますが、別ドメイン構成ほど強いセキュリティ境界にはなりません。自分で確認できるコードだけを実行してください。
+1ドメイン構成ですが、プレビューiframeには`sandbox="allow-scripts"`を指定し、親画面とは別の不透明な実行元にしています。画像アップロードと作品保存は親画面から行います。自分で確認できるコードだけを実行してください。
 
 ## ユーザーコードの契約
 

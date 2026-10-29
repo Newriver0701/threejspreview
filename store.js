@@ -45,7 +45,7 @@ function validateOverrides(value) {
   const result = {};
   if (!value || typeof value !== "object" || Array.isArray(value)) return result;
   for (const [key, url] of Object.entries(value).slice(0, 100)) {
-    if (/^\d+:\d+:[a-zA-Z]+$/.test(key) && typeof url === "string" &&
+    if (/^(?:image:[0-9a-f]{16}|slot:[a-zA-Z0-9_-]{1,80}|picker:[0-9a-f]{16})$/.test(key) && typeof url === "string" &&
         /^\/api\/assets\/[0-9a-f-]{36}$/i.test(url)) result[key] = url;
   }
   return result;
