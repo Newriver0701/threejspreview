@@ -37,6 +37,11 @@
       let previewFailed = false;
       let previewStartedAt = performance.now();
       let previewFps = 30;
+      let previewPaused = false;
+      let previewTime = 0;
+      let lastTimeSentAt = 0;
+      let seekVersion = 0;
+      let seekChain = Promise.resolve();
       let lastPreviewFrameAt = 0;
       let previewWidth = 720;
       let previewHeight = 1280;
@@ -56,6 +61,7 @@
       const pendingByImage = new WeakMap();
       let inputScanTimer = 0;
       const normalizedCanvas = document.createElement("canvas");
+      let videoStage = null;
 
       const send = (type, payload = {}) => {
         parent.postMessage({ source: "three-preview", runId, type, ...payload }, "*");
@@ -332,6 +338,152 @@
         setTimeout(finish, 50);
       });
 
+      function selectVideoStage() {
+        const canvas = trackedThree.renderer?.domElement || document.querySelector("canvas");
+        const explicit = globalThis.videoStage;
+        if (explicit != null) {
+          if (!(explicit instanceof HTMLElement) || !explicit.contains(canvas)) {
+            throw new Error("globalThis.videoStage にはThree.jsのCanvasを含む要素を指定してください。");
+          }
+          return explicit;
+        }
+        const parentElement = canvas?.parentElement;
+        return parentElement && parentElement !== document.body &&
+          [...parentElement.children].some((child) => child !== canvas) ? parentElement : null;
+      }
+
+      function syncDomAnimations(timeSeconds) {
+        if (!videoStage?.getAnimations) return;
+        for (const animation of videoStage.getAnimations({ subtree: true })) {
+          try {
+            animation.pause();
+            animation.currentTime = timeSeconds * 1000;
+          } catch { /* Some browser-owned animations cannot be sought. */ }
+        }
+      }
+
+      async function waitForStageAssets() {
+        await document.fonts.ready;
+        if (!videoStage) return;
+        await Promise.all([...videoStage.querySelectorAll("img")].map(async (image) => {
+          if (!image.complete) await new Promise((resolve) => {
+            image.addEventListener("load", resolve, { once: true });
+            image.addEventListener("error", resolve, { once: true });
+            setTimeout(resolve, 15_000);
+          });
+          if (image.naturalWidth && image.decode) await image.decode().catch(() => {});
+        }));
+      }
+
+      function drawElementText(context, element, style, rect) {
+        const text = [...element.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent).join("");
+        if (!text.trim()) return;
+        const fontSize = parseFloat(style.fontSize) || 16;
+        const lineHeight = Number.isFinite(parseFloat(style.lineHeight)) ? parseFloat(style.lineHeight) : fontSize * 1.2;
+        const leftPadding = parseFloat(style.paddingLeft) || 0;
+        const rightPadding = parseFloat(style.paddingRight) || 0;
+        const topPadding = parseFloat(style.paddingTop) || 0;
+        const maxWidth = Math.max(1, rect.width - leftPadding - rightPadding);
+        context.fillStyle = style.color;
+        context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+        context.textBaseline = "top";
+        context.textAlign = style.textAlign === "center" ? "center" : style.textAlign === "right" || style.textAlign === "end" ? "right" : "left";
+        if ("letterSpacing" in context) context.letterSpacing = style.letterSpacing;
+        const shadow = /(rgba?\([^)]*\)|#[0-9a-f]+|[a-z]+)\s+(-?[\d.]+)px\s+(-?[\d.]+)px\s+([\d.]+)px/i.exec(style.textShadow);
+        if (shadow) {
+          context.shadowColor = shadow[1];
+          context.shadowOffsetX = Number(shadow[2]);
+          context.shadowOffsetY = Number(shadow[3]);
+          context.shadowBlur = Number(shadow[4]);
+        }
+        const lines = [];
+        for (const paragraph of text.split("\n")) {
+          if (!paragraph) { lines.push(""); continue; }
+          let line = "";
+          for (const character of paragraph) {
+            if (line && context.measureText(line + character).width > maxWidth && style.whiteSpace !== "nowrap") {
+              lines.push(line);
+              line = "";
+            }
+            line += character;
+          }
+          lines.push(line);
+        }
+        const x = context.textAlign === "center" ? rect.left + rect.width / 2 :
+          context.textAlign === "right" ? rect.right - rightPadding : rect.left + leftPadding;
+        lines.forEach((line, index) => context.fillText(line, x, rect.top + topPadding + (lineHeight - fontSize) / 2 + index * lineHeight));
+      }
+
+      function drawHtmlOverlay(context, root, sourceCanvas, stageRect) {
+        function drawNode(element) {
+          if (!(element instanceof HTMLElement) || element === sourceCanvas) return;
+          const style = getComputedStyle(element);
+          if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return;
+          const bounds = element.getBoundingClientRect();
+          if (!bounds.width || !bounds.height) return;
+          const rect = {
+            left: bounds.left - stageRect.left,
+            top: bounds.top - stageRect.top,
+            width: bounds.width,
+            height: bounds.height,
+            right: bounds.right - stageRect.left
+          };
+          context.save();
+          context.globalAlpha *= Number(style.opacity) || 1;
+          const background = style.backgroundColor;
+          if (background && background !== "rgba(0, 0, 0, 0)" && background !== "transparent") {
+            context.fillStyle = background;
+            context.fillRect(rect.left, rect.top, rect.width, rect.height);
+          }
+          if (style.backgroundImage.startsWith("linear-gradient(")) {
+            const colors = style.backgroundImage.match(/rgba?\([^)]*\)|#[0-9a-f]{3,8}/gi);
+            if (colors?.length >= 2) {
+              const horizontal = /(?:90|270)deg/.test(style.backgroundImage);
+              const gradient = context.createLinearGradient(rect.left, rect.top,
+                horizontal ? rect.right : rect.left, horizontal ? rect.top : rect.top + rect.height);
+              gradient.addColorStop(0, colors[0]);
+              gradient.addColorStop(1, colors.at(-1));
+              context.fillStyle = gradient;
+              context.fillRect(rect.left, rect.top, rect.width, rect.height);
+            }
+          }
+          if (element instanceof HTMLImageElement && element.complete && element.naturalWidth) {
+            context.drawImage(element, rect.left, rect.top, rect.width, rect.height);
+          }
+          if (element instanceof HTMLCanvasElement) context.drawImage(element, rect.left, rect.top, rect.width, rect.height);
+          drawElementText(context, element, style, rect);
+          for (const child of element.children) drawNode(child);
+          context.restore();
+        }
+        for (const child of root.children) drawNode(child);
+      }
+
+      async function stageToPngBlob(sourceCanvas) {
+        if (!videoStage) return canvasToPngBlob(sourceCanvas);
+        const stageRect = videoStage.getBoundingClientRect();
+        const canvasRect = sourceCanvas.getBoundingClientRect();
+        if (stageRect.width <= 0 || stageRect.height <= 0) throw new Error("動画ステージのサイズが0です。");
+        const scaleX = exportWidth / stageRect.width;
+        const scaleY = exportHeight / stageRect.height;
+        normalizedCanvas.width = exportWidth;
+        normalizedCanvas.height = exportHeight;
+        const context = normalizedCanvas.getContext("2d", { alpha: true });
+        context.clearRect(0, 0, exportWidth, exportHeight);
+        context.drawImage(sourceCanvas,
+          (canvasRect.left - stageRect.left) * scaleX,
+          (canvasRect.top - stageRect.top) * scaleY,
+          canvasRect.width * scaleX, canvasRect.height * scaleY);
+        context.save();
+        context.scale(scaleX, scaleY);
+        drawHtmlOverlay(context, videoStage, sourceCanvas, stageRect);
+        context.restore();
+        return new Promise((resolve, reject) => normalizedCanvas.toBlob(
+          (blob) => blob ? resolve(blob) : reject(new Error("字幕付きフレームをPNG化できませんでした。画像のCORS設定を確認してください。")),
+          "image/png"
+        ));
+      }
+
       const canvasToPngBlob = (sourceCanvas) => new Promise((resolve, reject) => {
         try {
           let canvas = sourceCanvas;
@@ -381,7 +533,14 @@
         lastPreviewFrameAt = now - ((now - lastPreviewFrameAt) % frameInterval);
         rendering = true;
         try {
-          await globalThis.renderAt((now - previewStartedAt) / 1000);
+          if (previewPaused) return;
+          previewTime = (now - previewStartedAt) / 1000;
+          await globalThis.renderAt(previewTime);
+          syncDomAnimations(previewTime);
+          if (now - lastTimeSentAt >= 250) {
+            lastTimeSentAt = now;
+            send("preview-time", { timeSeconds: previewTime });
+          }
         } catch (error) {
           previewFailed = true;
           send("error", { message: describe(error) });
@@ -394,10 +553,16 @@
         while (rendering) await nextPaint();
       }
 
+      function getDeclaredDuration() {
+        const value = globalThis.exportDurationSeconds ?? globalThis.EXPORT_CONFIG?.duration ?? globalThis.sceneDuration;
+        const seconds = Number(value);
+        return Number.isFinite(seconds) && seconds >= 1 ? seconds : null;
+      }
+
       async function initialize(code, width, height, fps, overrides) {
         previewWidth = width;
         previewHeight = height;
-        previewFps = fps === 24 ? 24 : 30;
+        previewFps = [24, 30, 60].includes(fps) ? fps : 30;
         assetOverrides = overrides || {};
         replacementSources = new Set(Object.values(assetOverrides).map(normalizeSource).filter(Boolean));
         document.documentElement.dataset.stage = "importing-three";
@@ -432,16 +597,20 @@
         }
 
         await globalThis.renderAt(0);
+        videoStage = selectVideoStage();
+        if (videoStage) videoStage.dataset.threePreviewStage = "1";
+        (trackedThree.renderer?.domElement || document.querySelector("canvas")).dataset.threePreviewCanvas = "1";
         if (typeof globalThis.setRenderSize !== "function") {
           globalThis.setRenderSize = automaticSetRenderSize;
         }
         await resizeRenderer(previewWidth, previewHeight);
         await globalThis.renderAt(0);
+        syncDomAnimations(0);
         initialized = true;
         document.documentElement.dataset.stage = "initialized";
         previewStartedAt = performance.now();
         lastPreviewFrameAt = previewStartedAt;
-        send("ready");
+        send("ready", { duration: getDeclaredDuration() });
       }
 
       window.addEventListener("message", async (event) => {
@@ -466,17 +635,38 @@
         if (!initialized || data.runId !== runId) return;
 
         if (data.type === "preview-fps") {
-          previewFps = data.fps === 24 ? 24 : 30;
+          previewFps = [24, 30, 60].includes(data.fps) ? data.fps : 30;
           lastPreviewFrameAt = performance.now();
+        }
+
+        if (data.type === "preview-play-state") {
+          await seekChain;
+          previewPaused = Boolean(data.paused);
+          if (!previewPaused) previewStartedAt = performance.now() - previewTime * 1000;
+        }
+
+        if (data.type === "preview-seek") {
+          previewPaused = true;
+          const version = ++seekVersion;
+          seekChain = seekChain.catch(() => {}).then(async () => {
+            await waitForIdle();
+            if (version !== seekVersion) return;
+            previewTime = Math.max(0, Number(data.timeSeconds) || 0);
+            await globalThis.renderAt(previewTime);
+            syncDomAnimations(previewTime);
+            send("preview-seeked", { timeSeconds: previewTime });
+          }).catch((error) => send("error", { message: describe(error) }));
         }
 
         if (data.type === "preview-resize") {
           try {
             await waitForIdle();
+            await seekChain;
             previewWidth = data.width;
             previewHeight = data.height;
             await resizeRenderer(previewWidth, previewHeight);
-            await globalThis.renderAt((performance.now() - previewStartedAt) / 1000);
+            await globalThis.renderAt(previewTime);
+            syncDomAnimations(previewTime);
             previewFailed = false;
             send("preview-resized", { width: previewWidth, height: previewHeight });
           } catch (error) {
@@ -490,7 +680,9 @@
             exportWidth = data.width;
             exportHeight = data.height;
             await waitForIdle();
+            await seekChain;
             await resizeRenderer(data.width, data.height);
+            await waitForStageAssets();
             send("export-ready");
           } catch (error) {
             exporting = false;
@@ -503,10 +695,10 @@
         if (data.type === "export-frame") {
           try {
             await globalThis.renderAt(data.timeSeconds);
-            await nextPaint();
-            const canvas = document.querySelector("canvas");
+            syncDomAnimations(data.timeSeconds);
+            const canvas = trackedThree.renderer?.domElement || document.querySelector("canvas");
             if (!canvas) throw new Error("書き出せるCanvasが見つかりません。");
-            const blob = await canvasToPngBlob(canvas);
+            const blob = await stageToPngBlob(canvas);
             send("export-frame", { requestId: data.requestId, blob, width: exportWidth, height: exportHeight });
           } catch (error) {
             send("export-frame-error", { requestId: data.requestId, message: describe(error) });
@@ -516,8 +708,9 @@
         if (data.type === "export-end") {
           try {
             await resizeRenderer(previewWidth, previewHeight);
-            await globalThis.renderAt(0);
-            previewStartedAt = performance.now();
+            await globalThis.renderAt(previewTime);
+            syncDomAnimations(previewTime);
+            previewStartedAt = performance.now() - previewTime * 1000;
             lastPreviewFrameAt = previewStartedAt;
             previewFailed = false;
             send("export-ended", { width: previewWidth, height: previewHeight });

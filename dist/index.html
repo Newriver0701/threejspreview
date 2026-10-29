@@ -85,16 +85,24 @@
         </div>
 
         <div class="stage-wrap">
+          <div id="preview-viewport">
           <iframe
             id="preview-frame"
             title="Three.jsコードの隔離プレビュー"
             sandbox="allow-scripts"
             referrerpolicy="no-referrer"
           ></iframe>
+          </div>
           <div id="empty-state" class="empty-state">
             <span class="empty-mark" aria-hidden="true">3D</span>
             <p>コードを実行すると、ここに表示されます。</p>
           </div>
+        </div>
+
+        <div class="timeline-controls">
+          <button id="preview-play-toggle" type="button" disabled>一時停止</button>
+          <input id="preview-timeline" type="range" min="0" max="10" step="0.001" value="0" aria-label="プレビューをシーク" disabled />
+          <span id="preview-time-label">0:00 / 0:10</span>
         </div>
 
         <div class="export-panel" aria-labelledby="export-title">
@@ -116,13 +124,26 @@
                 <option value="360x640@24">360 × 640 / 24fps</option>
                 <option value="1080x1080@30">1080 × 1080 / 30fps</option>
                 <option value="1920x1080@30">1920 × 1080 / 30fps</option>
+                <option value="540x960@30">540 × 960 / 30fps</option>
+                <option value="540x960@60">540 × 960 / 60fps</option>
+                <option value="1080x1920@60">1080 × 1920 / 60fps</option>
               </select>
             </label>
 
             <label class="field">
-              <span>動画時間（秒）</span>
-              <input id="export-duration" type="number" min="1" max="30" step="1" value="10" />
+              <span>動画時間</span>
+              <select id="export-duration-mode">
+                <option value="manual" selected>秒数を指定</option>
+                <option value="auto">JSの終了時刻を使う</option>
+              </select>
             </label>
+
+            <label class="field" id="export-duration-manual-field">
+              <span>秒数（1～600秒）</span>
+              <input id="export-duration" type="number" min="1" max="600" step="1" value="10" />
+            </label>
+
+            <p id="export-duration-auto-note" class="export-duration-auto-note" hidden></p>
 
             <label class="field">
               <span>画質</span>
@@ -142,6 +163,7 @@
           <div id="export-progress" class="export-progress" role="status" hidden>
             <progress id="export-progress-bar" max="1" value="0"></progress>
             <span id="export-progress-text">準備中…</span>
+            <button id="export-cancel" type="button">中断</button>
           </div>
         </div>
       </section>
