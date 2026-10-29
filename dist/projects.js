@@ -2,11 +2,46 @@ const projectName = document.querySelector("#project-name");
 const projectList = document.querySelector("#project-list");
 const saveStatus = document.querySelector("#save-status");
 const candidates = document.querySelector("#asset-candidates");
+const saveProjectButton = document.querySelector("#save-project");
+const updateProjectButton = document.querySelector("#update-project");
+const duplicateProjectButton = document.querySelector("#duplicate-project");
+const restoreProjectButton = document.querySelector("#restore-project");
+const openProjectButton = document.querySelector("#open-project");
+const deleteProjectButton = document.querySelector("#delete-project");
+const DRAFT_PREFIX = "three-preview-project-draft:";
+const NEW_DRAFT_KEY = `${DRAFT_PREFIX}new`;
 let activeProjectId = localStorage.getItem("three-preview-project-id") || "";
-let saveTimer;
-let saveQueue = Promise.resolve();
 let imageOverrides = JSON.parse(localStorage.getItem("three-preview-image-overrides") || "{}");
 let runtimeCandidates = [];
+let savedSnapshot = null;
+let saving = false;
+
+function draftKey(id = activeProjectId) { return id ? `${DRAFT_PREFIX}${id}` : NEW_DRAFT_KEY; }
+function currentSnapshot() {
+  return { name: projectName.value.trim() || "無題", code: editor.value, overrides: { ...imageOverrides } };
+}
+function snapshotText(snapshot = currentSnapshot()) { return JSON.stringify(snapshot); }
+function readDraft(id = activeProjectId) {
+  try { return JSON.parse(localStorage.getItem(draftKey(id)) || "null"); } catch { return null; }
+}
+function updateSaveButtons() {
+  editor.disabled = saving;
+  projectName.disabled = saving;
+  saveProjectButton.disabled = saving;
+  duplicateProjectButton.disabled = saving;
+  updateProjectButton.disabled = saving || !activeProjectId;
+  restoreProjectButton.disabled = saving || !activeProjectId;
+  openProjectButton.disabled = saving;
+  deleteProjectButton.disabled = saving;
+}
+
+function setEditorState(snapshot) {
+  projectName.value = snapshot.name || "無題";
+  editor.value = snapshot.code || "";
+  imageOverrides = { ...(snapshot.overrides || {}) };
+  localStorage.setItem("three-preview-image-overrides", JSON.stringify(imageOverrides));
+  renderCandidates();
+}
 
 function getImageOverrides() { return imageOverrides; }
 
@@ -23,22 +58,15 @@ async function api(url, options = {}) {
 }
 
 function persistDraft() {
-  localStorage.setItem("three-preview-draft", editor.value);
-  localStorage.setItem("three-preview-draft-name", projectName.value);
-  saveStatus.textContent = "保存待ち";
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    if (!activeProjectId) {
-      saveStatus.textContent = "下書きを端末に保存済み";
-      return;
-    }
-    const id = activeProjectId;
-    const payload = JSON.stringify({ name: projectName.value, code: editor.value, overrides: imageOverrides });
-    saveQueue = saveQueue.then(async () => {
-      await api(`/api/projects/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: payload });
-      saveStatus.textContent = "自動保存済み";
-    }).catch((error) => { saveStatus.textContent = error.message; });
-  }, 800);
+  const snapshot = currentSnapshot();
+  if (activeProjectId && savedSnapshot && snapshotText(snapshot) === snapshotText(savedSnapshot)) {
+    localStorage.removeItem(draftKey());
+    saveStatus.textContent = "保存済み";
+  } else {
+    localStorage.setItem(draftKey(), snapshotText(snapshot));
+    saveStatus.textContent = activeProjectId ? "未保存の変更（端末に下書き保存済み）" : "端末に下書き保存済み";
+  }
+  updateSaveButtons();
 }
 
 function renderCandidates() {
@@ -94,60 +122,104 @@ async function refreshProjects() {
 }
 
 async function openProject(id) {
-  if (!id) return;
-  if (activeProjectId && activeProjectId !== id) {
-    clearTimeout(saveTimer);
-    const previousId = activeProjectId;
-    const previous = JSON.stringify({ name: projectName.value, code: editor.value, overrides: imageOverrides });
-    await saveQueue;
-    await api(`/api/projects/${previousId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: previous });
-  }
-  clearTimeout(saveTimer);
-  await saveQueue;
+  if (!id || saving) return;
   const project = await api(`/api/projects/${id}`);
   activeProjectId = id;
   localStorage.setItem("three-preview-project-id", id);
-  projectName.value = project.name;
-  editor.value = project.code;
-  imageOverrides = project.image_overrides || {};
-  localStorage.setItem("three-preview-image-overrides", JSON.stringify(imageOverrides));
-  localStorage.setItem("three-preview-draft", editor.value);
-  renderCandidates();
-  saveStatus.textContent = "作品を読み込みました";
+  savedSnapshot = { name: project.name, code: project.code, overrides: project.image_overrides || {} };
+  setEditorState(readDraft(id) || savedSnapshot);
+  persistDraft();
   runCode();
 }
 
+async function withSaving(action) {
+  if (saving) return;
+  saving = true;
+  updateSaveButtons();
+  try { await action(); }
+  finally { saving = false; updateSaveButtons(); }
+}
+
 async function createProject(name = projectName.value) {
-  clearTimeout(saveTimer);
-  await saveQueue;
-  const project = await api("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, code: editor.value, overrides: imageOverrides }) });
-  activeProjectId = project.id;
-  localStorage.setItem("three-preview-project-id", project.id);
-  projectName.value = project.name;
-  saveStatus.textContent = "作品を保存しました";
-  await refreshProjects();
+  await withSaving(async () => {
+    const previousDraftKey = draftKey();
+    const snapshot = { ...currentSnapshot(), name: String(name || "無題").trim().slice(0, 120) || "無題" };
+    const project = await api("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: snapshotText(snapshot) });
+    localStorage.removeItem(previousDraftKey);
+    activeProjectId = project.id;
+    localStorage.setItem("three-preview-project-id", project.id);
+    savedSnapshot = snapshot;
+    setEditorState(snapshot);
+    persistDraft();
+    saveStatus.textContent = "新しい作品として保存しました";
+    await refreshProjects();
+  });
+}
+
+async function updateProject() {
+  if (!activeProjectId) return;
+  await withSaving(async () => {
+    const id = activeProjectId;
+    const snapshot = currentSnapshot();
+    await api(`/api/projects/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: snapshotText(snapshot) });
+    savedSnapshot = snapshot;
+    localStorage.removeItem(draftKey(id));
+    persistDraft();
+    saveStatus.textContent = "上書き保存しました";
+    await refreshProjects();
+  });
+}
+
+async function restoreProject() {
+  if (!activeProjectId || saving) return;
+  const project = await api(`/api/projects/${activeProjectId}`);
+  savedSnapshot = { name: project.name, code: project.code, overrides: project.image_overrides || {} };
+  localStorage.removeItem(draftKey());
+  setEditorState(savedSnapshot);
+  persistDraft();
+  saveStatus.textContent = "保存済みの内容に戻しました";
+  runCode();
 }
 
 editor.addEventListener("input", handleEditorChange);
 projectName.addEventListener("input", persistDraft);
-document.querySelector("#save-project").onclick = () => createProject().catch((error) => showError(error.message));
-document.querySelector("#duplicate-project").onclick = () => createProject(`${projectName.value} のコピー`).catch((error) => showError(error.message));
-document.querySelector("#open-project").onclick = () => openProject(projectList.value).catch((error) => showError(error.message));
-document.querySelector("#delete-project").onclick = async () => {
+saveProjectButton.onclick = () => createProject().catch((error) => showError(error.message));
+updateProjectButton.onclick = () => updateProject().catch((error) => showError(error.message));
+duplicateProjectButton.onclick = () => createProject(`${projectName.value} のコピー`).catch((error) => showError(error.message));
+restoreProjectButton.onclick = () => restoreProject().catch((error) => showError(error.message));
+openProjectButton.onclick = () => openProject(projectList.value).catch((error) => showError(error.message));
+deleteProjectButton.onclick = async () => {
   if (!projectList.value || !confirm("この作品を削除しますか？")) return;
   try {
     const id = projectList.value;
     await api(`/api/projects/${id}`, { method: "DELETE" });
-    if (activeProjectId === id) { activeProjectId = ""; localStorage.removeItem("three-preview-project-id"); }
+    localStorage.removeItem(draftKey(id));
+    if (activeProjectId === id) {
+      activeProjectId = "";
+      savedSnapshot = null;
+      localStorage.removeItem("three-preview-project-id");
+      persistDraft();
+    }
     await refreshProjects();
     saveStatus.textContent = "作品を削除しました";
   } catch (error) { showError(error.message); }
 };
 
-projectName.value = localStorage.getItem("three-preview-draft-name") || "無題";
+const legacyDraft = localStorage.getItem("three-preview-draft");
+if (legacyDraft !== null && !readDraft()) {
+  localStorage.setItem(draftKey(), snapshotText({
+    name: localStorage.getItem("three-preview-draft-name") || "無題",
+    code: legacyDraft,
+    overrides: imageOverrides
+  }));
+}
+localStorage.removeItem("three-preview-draft");
+localStorage.removeItem("three-preview-draft-name");
+const initialDraft = readDraft();
+if (initialDraft) setEditorState(initialDraft);
+else if (!activeProjectId) projectName.value = "無題";
 const oldCode = localStorage.getItem("three-preview-code");
-if (oldCode && !localStorage.getItem("three-preview-draft")) {
+if (oldCode && !initialDraft) {
   document.querySelector("#legacy-import").hidden = false;
   document.querySelector("#import-legacy").onclick = () => {
     editor.value = oldCode;
@@ -156,6 +228,7 @@ if (oldCode && !localStorage.getItem("three-preview-draft")) {
   };
 }
 renderCandidates();
+updateSaveButtons();
 refreshProjects().then(() => {
-  if (activeProjectId && !localStorage.getItem("three-preview-draft")) openProject(activeProjectId).catch(() => {});
+  if (activeProjectId) openProject(activeProjectId).catch((error) => { saveStatus.textContent = error.message; });
 }).catch((error) => { saveStatus.textContent = error.message; });
