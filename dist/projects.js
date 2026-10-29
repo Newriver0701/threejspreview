@@ -41,38 +41,9 @@ function persistDraft() {
   }, 800);
 }
 
-function imageReferences(code) {
-  const found = [];
-  const add = (start, end, label) => {
-    if (found.some((item) => start < item.end && end > item.start)) return;
-    found.push({ start, end, url: code.slice(start, end), label,
-      line: code.slice(0, start).split("\n").length });
-  };
-  // Only literal values can be safely replaced without changing JavaScript behavior.
-  const loaders = /(?:\.load\s*\(|\.src\s*=\s*|setAttribute\s*\(\s*['"]src['"]\s*,\s*)(['"`])((?:\\.|(?!\1)[^\\])*?)\1/g;
-  for (const match of code.matchAll(loaders)) {
-    const value = match[2];
-    if (!value || value.includes("${")) continue;
-    const start = match.index + match[0].indexOf(value);
-    add(start, start + value.length, "画像参照");
-  }
-  const embedded = /(['"`])(data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+)\1/g;
-  for (const match of code.matchAll(embedded)) {
-    const start = match.index + 1;
-    add(start, start + match[2].length, "埋め込み画像");
-  }
-  const slots = /\/\/\s*@image-slot:\s*([^\n]+)\n\s*(['"`])([^'"`\n]+)\2/g;
-  for (const match of code.matchAll(slots)) {
-    const start = match.index + match[0].lastIndexOf(match[3]);
-    add(start, start + match[3].length, match[1].trim());
-  }
-  return found.sort((a, b) => a.start - b.start);
-}
-
 function renderCandidates() {
   candidates.replaceChildren();
-  const references = imageReferences(editor.value);
-  if (!references.length && !runtimeCandidates.length) {
+  if (!runtimeCandidates.length) {
     const empty = document.createElement("p");
     empty.textContent = previewReady ? "このシーンに差し替え可能な画像はありません。" : "コードを実行すると画像候補が表示されます。";
     candidates.append(empty);
@@ -100,39 +71,7 @@ function renderCandidates() {
         const stored = await api("/api/assets", { method: "POST", headers: { "Content-Type": file.type }, body: file });
         imageOverrides[item.key] = stored.url;
         localStorage.setItem("three-preview-image-overrides", JSON.stringify(imageOverrides));
-        postToPreview("asset-override", { key: item.key, url: stored.url });
         persistDraft();
-        renderCandidates();
-      } catch (error) { showError(error.message); }
-      finally { input.disabled = false; }
-    };
-    row.append(img, label, input);
-    candidates.append(row);
-  }
-  for (const reference of references) {
-    const row = document.createElement("div");
-    row.className = "asset-row";
-    const img = document.createElement("img");
-    img.alt = "現在の画像";
-    img.src = reference.url;
-    img.onerror = () => { img.hidden = true; };
-    const label = document.createElement("span");
-    label.textContent = `${reference.label} · ${reference.line}行目 · ${reference.url.slice(0, 55)}`;
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = "image/png,image/jpeg,image/webp";
-    input.setAttribute("aria-label", `${reference.line}行目の画像をアップロード`);
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      if (file.size > 5 * 1024 * 1024) { showError("画像は1枚5MBまでです。"); return; }
-      try {
-        input.disabled = true;
-        const stored = await api("/api/assets", { method: "POST", headers: { "Content-Type": file.type }, body: file });
-        const current = imageReferences(editor.value).find((item) => item.start === reference.start && item.url === reference.url);
-        if (!current) throw new Error("コードが変更されました。画像候補を選び直してください。");
-        editor.value = editor.value.slice(0, current.start) + stored.url + editor.value.slice(current.end);
-        handleEditorChange();
         runCode();
       } catch (error) { showError(error.message); }
       finally { input.disabled = false; }

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'unsafe-inline' 'self' blob: https: http:; connect-src https: http:; img-src https: http: data: blob:; style-src 'unsafe-inline'; font-src data:;"
+      content="default-src 'none'; script-src 'unsafe-inline' 'self' blob: https: http:; connect-src https: http: data: blob:; img-src https: http: data: blob:; style-src 'unsafe-inline'; font-src data:;"
     />
     <style>
       html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #0c0d0d; }
@@ -43,14 +43,18 @@
       let exportWidth = 0;
       let exportHeight = 0;
       const trackedThree = { renderer: null, camera: null };
-      let activeTextures = new Map();
       let assetOverrides = {};
+      let replacementSources = new Set();
       const candidateCatalog = new Map();
       let candidateUpdateTimer = 0;
-      const imageCache = new Map();
-      const originalTextures = new Map();
-      const replacementTextures = new Map();
-      const pendingImages = new Set();
+      const registeredSlots = new Map();
+      const sourceAliases = new Map();
+      const suppressedInputs = new WeakSet();
+      const pickerInputs = new Map();
+      const slotOverrideTasks = new Set();
+      const pendingSourceLoads = new Set();
+      const pendingByImage = new WeakMap();
+      let inputScanTimer = 0;
       const normalizedCanvas = document.createElement("canvas");
 
       const send = (type, payload = {}) => {
@@ -75,87 +79,213 @@
         renderer.render = function (scene, camera) {
           trackedThree.renderer = this;
           trackedThree.camera = camera;
-          try { inspectTextures(scene); } catch (error) { console.warn("画像候補の取得に失敗しました", error); }
           return originalRender.call(this, scene, camera);
         };
         return renderer;
       }
 
-      function inspectTextures(scene) {
-        const textures = new Map();
-        let discovered = false;
-        let objectIndex = 0;
-        if (!scene || typeof scene.traverse !== "function") return;
-        scene.traverse((object) => {
-          if (!object.material) return;
-          const index = objectIndex++;
-          const materials = Array.isArray(object.material) ? object.material : [object.material];
-          materials.forEach((material, materialIndex) => {
-            for (const slot of ["map", "emissiveMap", "alphaMap", "normalMap", "bumpMap", "roughnessMap"]) {
-              const texture = material?.[slot];
-              if (!texture?.isTexture) continue;
-              const key = `${index}:${materialIndex}:${slot}`;
-              if (texture !== replacementTextures.get(key)?.texture) originalTextures.set(key, texture);
-              const original = originalTextures.get(key);
-              textures.set(key, { material, slot, original });
-              if (assetOverrides[key]) applyTextureOverride(key, textures.get(key), assetOverrides[key]);
-              if (candidateCatalog.has(key)) continue;
-              const source = original.image;
-              let thumbnail = source?.src?.startsWith("http") ? source.src : "";
-              if (!thumbnail && source?.width && source?.height) {
-                try {
-                  const thumb = document.createElement("canvas");
-                  thumb.width = 96;
-                  thumb.height = 96;
-                  thumb.getContext("2d").drawImage(source, 0, 0, 96, 96);
-                  thumbnail = thumb.toDataURL("image/png");
-                } catch { /* The source may not be readable as a canvas. */ }
-              }
-              candidateCatalog.set(key, { key, label: `${object.name || `オブジェクト ${index + 1}`} / ${slot}`, thumbnail });
-              discovered = true;
-            }
-          });
-        });
-        activeTextures = textures;
-        if (discovered && !candidateUpdateTimer) {
-          candidateUpdateTimer = setTimeout(() => {
-            candidateUpdateTimer = 0;
-            send("texture-candidates", { candidates: [...candidateCatalog.values()] });
-          }, 200);
+      function hashSource(value) {
+        let hash = 0xcbf29ce484222325n;
+        for (let index = 0; index < value.length; index++) {
+          hash ^= BigInt(value.charCodeAt(index));
+          hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+        }
+        return hash.toString(16).padStart(16, "0");
+      }
+
+      function normalizeSource(value) {
+        const source = String(value || "");
+        if (!source || source.startsWith("blob:") || source.startsWith("about:")) return "";
+        if (source.startsWith("data:image/")) return source;
+        try {
+          const url = new URL(source, location.href);
+          return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+        } catch { return ""; }
+      }
+
+      function sourceKey(source) { return `image:${hashSource(source)}`; }
+
+      function sourceLabel(source) {
+        if (source.startsWith("data:")) return "埋め込み画像";
+        try {
+          const url = new URL(source);
+          const file = decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) || url.hostname);
+          return file.length > 60 ? `${file.slice(0, 57)}…` : file;
+        } catch { return "画像ファイル"; }
+      }
+
+      function sendCandidatesSoon() {
+        if (candidateUpdateTimer) return;
+        candidateUpdateTimer = setTimeout(() => {
+          candidateUpdateTimer = 0;
+          send("texture-candidates", { candidates: [...candidateCatalog.values()] });
+        }, 150);
+      }
+
+      function thumbnailFromTexture(texture) {
+        const source = texture?.image;
+        if (!source?.width || !source?.height) return "";
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = 96;
+          canvas.height = 96;
+          canvas.getContext("2d").drawImage(source, 0, 0, 96, 96);
+          return canvas.toDataURL("image/png");
+        } catch { return source.src?.startsWith("http") ? source.src : ""; }
+      }
+
+      function refreshSlotThumbnail(key) {
+        const slot = registeredSlots.get(key);
+        const candidate = candidateCatalog.get(key);
+        if (!slot || !candidate) return;
+        let thumbnail = "";
+        try { thumbnail = thumbnailFromTexture(slot.getTexture?.()); } catch { return; }
+        if (thumbnail && thumbnail !== candidate.thumbnail) {
+          candidate.thumbnail = thumbnail;
+          sendCandidatesSoon();
         }
       }
 
-      function applyTextureOverride(key, target, url) {
-        const previous = replacementTextures.get(key);
-        if (previous?.url === url) {
-          if (target.material[target.slot] !== previous.texture) target.material[target.slot] = previous.texture;
+      globalThis.registerImageSlot = (slot) => {
+        if (!/^[a-zA-Z0-9_-]{1,80}$/.test(slot?.id) || !slot.label || typeof slot.apply !== "function") {
+          throw new Error("registerImageSlotには英数字のid、label、applyが必要です。");
+        }
+        const key = `slot:${slot.id}`;
+        registeredSlots.set(key, slot);
+        if (slot.input instanceof HTMLInputElement) suppressedInputs.add(slot.input);
+        for (const value of Array.isArray(slot.sources) ? slot.sources : []) {
+          const source = normalizeSource(value);
+          if (!source) continue;
+          sourceAliases.set(source, key);
+          candidateCatalog.delete(sourceKey(source));
+        }
+        candidateCatalog.set(key, { key, label: slot.label, thumbnail: "" });
+        sendCandidatesSoon();
+        const task = Promise.resolve(slot.ready).catch(() => {}).then(async () => {
+          if (assetOverrides[key]) await slot.apply(assetOverrides[key]);
+          refreshSlotThumbnail(key);
+        });
+        if (assetOverrides[key]) {
+          slotOverrideTasks.add(task);
+          task.catch(() => {});
+        } else task.catch(() => {});
+        return task;
+      };
+
+      function trackImageSource(image, value, nativeSetter) {
+        const prior = pendingByImage.get(image);
+        prior?.cancel();
+        const source = normalizeSource(value);
+        if (!source || source.includes("/api/assets/") || replacementSources.has(source)) {
+          if (String(value).startsWith("blob:")) watchImageLoad(image, String(value));
+          nativeSetter.call(image, value);
           return;
         }
-        let image = imageCache.get(url);
-        if (!image) {
-          image = new Image();
-          image.crossOrigin = "anonymous";
-          image.src = url;
-          imageCache.set(url, image);
+        const key = sourceAliases.get(source) || sourceKey(source);
+        if (!candidateCatalog.has(key)) {
+          candidateCatalog.set(key, {
+            key,
+            label: sourceLabel(source),
+            thumbnail: source.startsWith("data:") ? "" : source
+          });
+          sendCandidatesSoon();
         }
-        if (image.complete && image.naturalWidth) {
-          previous?.texture.dispose();
-          const replacement = target.original.clone();
-          replacement.source = new globalThis.THREE.Source(image);
-          replacement.needsUpdate = true;
-          target.material[target.slot] = replacement;
-          replacementTextures.set(key, { url, texture: replacement });
-        } else {
-          const pendingKey = `${key}:${url}`;
-          if (!pendingImages.has(pendingKey)) {
-            pendingImages.add(pendingKey);
-            image.addEventListener("load", () => {
-              pendingImages.delete(pendingKey);
-              applyTextureOverride(key, activeTextures.get(key) || target, url);
-            }, { once: true });
-          }
-        }
+        watchImageLoad(image, source, key);
+        if (assetOverrides[key]) image.crossOrigin = "anonymous";
+        nativeSetter.call(image, assetOverrides[key] || value);
       }
+
+      function watchImageLoad(image, source, key = "") {
+        const pending = { image, source };
+        pendingSourceLoads.add(pending);
+        pendingByImage.set(image, pending);
+        pending.cancel = () => {
+          image.removeEventListener("load", complete);
+          image.removeEventListener("error", complete);
+          pendingSourceLoads.delete(pending);
+          if (pendingByImage.get(image) === pending) pendingByImage.delete(image);
+        };
+        const complete = (event) => {
+          pending.cancel();
+          const candidate = key && candidateCatalog.get(key);
+          if (event.type === "load" && candidate && key.startsWith("image:") &&
+              !candidate.thumbnail.startsWith("data:")) {
+            const thumbnail = thumbnailFromTexture({ image });
+            if (thumbnail) {
+              candidate.thumbnail = thumbnail;
+              sendCandidatesSoon();
+            }
+          }
+        };
+        image.addEventListener("load", complete);
+        image.addEventListener("error", complete);
+      }
+
+      const imageSourceDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+      if (imageSourceDescriptor?.set) {
+        Object.defineProperty(HTMLImageElement.prototype, "src", {
+          configurable: true,
+          enumerable: imageSourceDescriptor.enumerable,
+          get: imageSourceDescriptor.get,
+          set(value) { trackImageSource(this, value, imageSourceDescriptor.set); }
+        });
+        const nativeSetAttribute = HTMLImageElement.prototype.setAttribute;
+        HTMLImageElement.prototype.setAttribute = function (name, value) {
+          if (String(name).toLowerCase() === "src") {
+            this.src = value;
+            return;
+          }
+          return nativeSetAttribute.call(this, name, value);
+        };
+      }
+
+      async function waitForImageLoads(timeoutMs = 15_000) {
+        const end = performance.now() + timeoutMs;
+        while (pendingSourceLoads.size && performance.now() < end) await nextPaint();
+        await Promise.resolve();
+      }
+
+      function scanImageInputs() {
+        const inputs = [...document.querySelectorAll('input[type="file"]')]
+          .filter((input) => !suppressedInputs.has(input) && /image|\.png|\.jpe?g|\.webp/i.test(input.accept));
+        inputs.forEach((input, index) => {
+          const key = `picker:${hashSource(input.id || input.name || String(index))}`;
+          pickerInputs.set(key, input);
+          if (!candidateCatalog.has(key)) {
+            const label = input.getAttribute("aria-label") || input.labels?.[0]?.textContent?.trim() ||
+              input.parentElement?.querySelector("button")?.textContent?.trim() || `画像選択 ${index + 1}`;
+            candidateCatalog.set(key, { key, label, thumbnail: "" });
+            sendCandidatesSoon();
+          }
+          if (assetOverrides[key] && !input.dataset.previewOverrideApplied) {
+            input.dataset.previewOverrideApplied = "1";
+            const task = applyFileInputOverride(input, assetOverrides[key]);
+            slotOverrideTasks.add(task);
+            task.catch(() => {});
+          }
+        });
+      }
+
+      async function applyFileInputOverride(input, url) {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error("保存した画像を読み込めませんでした。");
+        const blob = await response.blob();
+        const file = new File([blob], "replacement-image", { type: blob.type });
+        const transfer = new DataTransfer();
+        transfer.items.add(file);
+        input.files = transfer.files;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        await waitForImageLoads();
+        await nextPaint();
+      }
+
+      new MutationObserver(() => {
+        if (inputScanTimer) return;
+        inputScanTimer = setTimeout(() => {
+          inputScanTimer = 0;
+          scanImageInputs();
+        }, 100);
+      }).observe(document.body, { childList: true, subtree: true });
 
       function createTrackedThree(module) {
         let TrackedWebGLRenderer;
@@ -269,6 +399,7 @@
         previewHeight = height;
         previewFps = fps === 24 ? 24 : 30;
         assetOverrides = overrides || {};
+        replacementSources = new Set(Object.values(assetOverrides).map(normalizeSource).filter(Boolean));
         document.documentElement.dataset.stage = "importing-three";
         const threeModule = await import(THREE_MODULE_URL);
         document.documentElement.dataset.stage = "three-loaded";
@@ -287,6 +418,11 @@
         } finally {
           URL.revokeObjectURL(moduleUrl);
         }
+
+        scanImageInputs();
+        await waitForImageLoads();
+        await Promise.all([...slotOverrideTasks]);
+        slotOverrideTasks.clear();
 
         if (typeof globalThis.renderAt !== "function") {
           throw new Error("globalThis.renderAt(timeSeconds) を定義してください。");
@@ -328,12 +464,6 @@
         }
 
         if (!initialized || data.runId !== runId) return;
-
-        if (data.type === "asset-override") {
-          assetOverrides[data.key] = data.url;
-          const target = activeTextures.get(data.key);
-          if (target) applyTextureOverride(data.key, target, data.url);
-        }
 
         if (data.type === "preview-fps") {
           previewFps = data.fps === 24 ? 24 : 30;
