@@ -1,6 +1,6 @@
 # Three.js Preview
 
-Three.jsコードをsandbox iframe内でプレビューし、CanvasのPNG連番をFFmpeg.wasmでH.264 MP4へ変換するブラウザアプリです。Three.jsとFFmpegは同じドメインから配信され、サーバー側で動画変換は行いません。
+Three.jsコードをsandbox iframe内でプレビューし、CanvasとHTML字幕を合成したPNG連番をFFmpeg.wasmでH.264 MP4へ変換するブラウザアプリです。Three.jsとFFmpegは同じドメインから配信され、サーバー側で動画変換は行いません。
 
 ## セットアップ
 
@@ -75,6 +75,10 @@ globalThis.setRenderSize = async (width, height) => {
 
 `setRenderSize()`がない場合、アプリが`THREE.WebGLRenderer`と実際に描画へ使われたカメラを自動取得して補完します。変数名や関数内のローカル変数でも構いません。
 
+「JSの終了時刻を使う」を選ぶ場合、コード内で`globalThis.exportDurationSeconds = 12;`のように動画の長さを秒数で公開してください。既存の`globalThis.EXPORT_CONFIG.duration`と`globalThis.sceneDuration`にも対応します。`renderAt()`だけでは終了時刻を判定できないため、長さが公開されていないコードでは手動指定を使います。
+
+JSが`stage`要素を作り、その中にThree.jsのCanvasとHTML字幕を配置するコードは、そのまま1つの入力欄へ貼れます。Canvasの親要素に字幕など別の子要素があれば自動的に動画ステージとして扱います。自動検出できない場合は`globalThis.videoStage = stage;`を設定してください。書き出し時はDOMの計算済みスタイルからCanvasへ描き、文字、文字影、単純なグラデーション、位置、透明度を反映します。CSSの複雑なフィルター、ブレンド効果、変形、画像背景などは完全再現の対象外です。外部フォントと画像はCORS対応が必要です。
+
 プレビュー中は`renderAt()`が実時間で呼ばれます。MP4書き出し中はプレビューを停止し、フレーム`i`ごとに`renderAt(i / fps)`を呼んでPNGを生成します。
 
 プレビューとMP4の速度を一致させるため、プレビューの呼び出し回数もMP4側で選択した24fpsまたは30fpsに同期します。ユーザーコード内の独自`requestAnimationFrame()`／`renderer.setAnimationLoop()`は実行されません。アニメーション状態は可能な限り`renderAt(timeSeconds)`の引数から計算し、`rotation.y = timeSeconds * speed`のように時刻から直接求めてください。
@@ -83,7 +87,8 @@ globalThis.setRenderSize = async (width, height) => {
 
 - プレビュー解像度：1080×1920、720×1280、540×960、360×640、1080×1080、1920×1080
 - MP4解像度/FPS：1080×1920/30、720×1280/30、540×960/24、360×640/24、1080×1080/30、1920×1080/30
-- 動画時間：1～30秒
+- 動画時間：手動で1～600秒、またはJSが公開した終了時刻を自動使用（上限600秒）
+- 書き出し時は約1秒分のPNGごとにH.264へ変換し、PNGを削除してから次の区間へ進みます。長尺は端末性能とブラウザのメモリ容量に左右され、特にiPhoneでの10分書き出しは成功を保証できません。
 - 画質：CRF 20、24、28
 - 映像：H.264、`yuv420p`、`faststart`
 - 音声：なし
