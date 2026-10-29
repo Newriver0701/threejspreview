@@ -45,7 +45,8 @@
       const trackedThree = { renderer: null, camera: null };
       let activeTextures = new Map();
       let assetOverrides = {};
-      let candidateSignature = "";
+      const candidateCatalog = new Map();
+      let candidateUpdateTimer = 0;
       const imageCache = new Map();
       const originalTextures = new Map();
       const replacementTextures = new Map();
@@ -74,7 +75,7 @@
         renderer.render = function (scene, camera) {
           trackedThree.renderer = this;
           trackedThree.camera = camera;
-          inspectTextures(scene);
+          try { inspectTextures(scene); } catch (error) { console.warn("画像候補の取得に失敗しました", error); }
           return originalRender.call(this, scene, camera);
         };
         return renderer;
@@ -82,8 +83,9 @@
 
       function inspectTextures(scene) {
         const textures = new Map();
-        const visible = [];
+        let discovered = false;
         let objectIndex = 0;
+        if (!scene || typeof scene.traverse !== "function") return;
         scene.traverse((object) => {
           if (!object.material) return;
           const index = objectIndex++;
@@ -97,9 +99,10 @@
               const original = originalTextures.get(key);
               textures.set(key, { material, slot, original });
               if (assetOverrides[key]) applyTextureOverride(key, textures.get(key), assetOverrides[key]);
+              if (candidateCatalog.has(key)) continue;
               const source = original.image;
               let thumbnail = source?.src?.startsWith("http") ? source.src : "";
-              if (!thumbnail && source?.width && source?.height && !candidateSignature.includes(`${key}|`)) {
+              if (!thumbnail && source?.width && source?.height) {
                 try {
                   const thumb = document.createElement("canvas");
                   thumb.width = 96;
@@ -108,15 +111,17 @@
                   thumbnail = thumb.toDataURL("image/png");
                 } catch { /* The source may not be readable as a canvas. */ }
               }
-              visible.push({ key, label: `${object.name || `オブジェクト ${index + 1}`} / ${slot}`, thumbnail });
+              candidateCatalog.set(key, { key, label: `${object.name || `オブジェクト ${index + 1}`} / ${slot}`, thumbnail });
+              discovered = true;
             }
           });
         });
         activeTextures = textures;
-        const signature = visible.map((item) => `${item.key}|`).join("");
-        if (signature !== candidateSignature) {
-          candidateSignature = signature;
-          send("texture-candidates", { candidates: visible });
+        if (discovered && !candidateUpdateTimer) {
+          candidateUpdateTimer = setTimeout(() => {
+            candidateUpdateTimer = 0;
+            send("texture-candidates", { candidates: [...candidateCatalog.values()] });
+          }, 200);
         }
       }
 
