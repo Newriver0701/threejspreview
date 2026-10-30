@@ -62,6 +62,9 @@
       let inputScanTimer = 0;
       const normalizedCanvas = document.createElement("canvas");
       let videoStage = null;
+      let audioRender = null;
+      let audioDuration = 10;
+      let playbackDuration = 10;
 
       const send = (type, payload = {}) => {
         parent.postMessage({ source: "three-preview", runId, type, ...payload }, "*");
@@ -459,17 +462,25 @@
         for (const child of root.children) drawNode(child);
       }
 
-      async function stageToPngBlob(sourceCanvas) {
-        if (!videoStage) return canvasToPngBlob(sourceCanvas);
+      const encodeCanvas = (canvas, format) => new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("フレームを画像化できませんでした。")),
+          format === "jpeg" ? "image/jpeg" : "image/png", format === "jpeg" ? 0.9 : undefined);
+      });
+
+      async function stageToBlob(sourceCanvas, format) {
+        if (!videoStage) return canvasToBlob(sourceCanvas, format);
         const stageRect = videoStage.getBoundingClientRect();
         const canvasRect = sourceCanvas.getBoundingClientRect();
         if (stageRect.width <= 0 || stageRect.height <= 0) throw new Error("動画ステージのサイズが0です。");
         const scaleX = exportWidth / stageRect.width;
         const scaleY = exportHeight / stageRect.height;
-        normalizedCanvas.width = exportWidth;
-        normalizedCanvas.height = exportHeight;
-        const context = normalizedCanvas.getContext("2d", { alpha: true });
-        context.clearRect(0, 0, exportWidth, exportHeight);
+        if (normalizedCanvas.width !== exportWidth) normalizedCanvas.width = exportWidth;
+        if (normalizedCanvas.height !== exportHeight) normalizedCanvas.height = exportHeight;
+        const context = normalizedCanvas.getContext("2d", { alpha: format !== "jpeg" });
+        if (format === "jpeg") {
+          context.fillStyle = "#000";
+          context.fillRect(0, 0, exportWidth, exportHeight);
+        } else context.clearRect(0, 0, exportWidth, exportHeight);
         context.drawImage(sourceCanvas,
           (canvasRect.left - stageRect.left) * scaleX,
           (canvasRect.top - stageRect.top) * scaleY,
@@ -478,33 +489,62 @@
         context.scale(scaleX, scaleY);
         drawHtmlOverlay(context, videoStage, sourceCanvas, stageRect);
         context.restore();
-        return new Promise((resolve, reject) => normalizedCanvas.toBlob(
-          (blob) => blob ? resolve(blob) : reject(new Error("字幕付きフレームをPNG化できませんでした。画像のCORS設定を確認してください。")),
-          "image/png"
-        ));
+        return encodeCanvas(normalizedCanvas, format);
       }
 
-      const canvasToPngBlob = (sourceCanvas) => new Promise((resolve, reject) => {
+      const canvasToBlob = async (sourceCanvas, format) => {
         try {
           let canvas = sourceCanvas;
           if (exportWidth > 0 && exportHeight > 0 &&
-              (sourceCanvas.width !== exportWidth || sourceCanvas.height !== exportHeight)) {
-            normalizedCanvas.width = exportWidth;
-            normalizedCanvas.height = exportHeight;
-            const context = normalizedCanvas.getContext("2d", { alpha: true });
+              (sourceCanvas.width !== exportWidth || sourceCanvas.height !== exportHeight || format === "jpeg")) {
+            if (normalizedCanvas.width !== exportWidth) normalizedCanvas.width = exportWidth;
+            if (normalizedCanvas.height !== exportHeight) normalizedCanvas.height = exportHeight;
+            const context = normalizedCanvas.getContext("2d", { alpha: format !== "jpeg" });
             if (!context) throw new Error("書き出し用Canvasを作成できませんでした。");
-            context.clearRect(0, 0, exportWidth, exportHeight);
+            if (format === "jpeg") {
+              context.fillStyle = "#000";
+              context.fillRect(0, 0, exportWidth, exportHeight);
+            } else context.clearRect(0, 0, exportWidth, exportHeight);
             context.drawImage(sourceCanvas, 0, 0, exportWidth, exportHeight);
             canvas = normalizedCanvas;
           }
-          canvas.toBlob((blob) => {
-            if (blob) resolve(blob);
-            else reject(new Error("CanvasをPNG化できませんでした。"));
-          }, "image/png");
+          return await encodeCanvas(canvas, format);
         } catch (error) {
-          reject(new Error("CanvasのPNG化に失敗しました。外部画像のCORS設定を確認してください。\n" + error.message));
+          throw new Error("Canvasの画像化に失敗しました。外部画像のCORS設定を確認してください。\n" + error.message);
         }
-      });
+      };
+
+      function audioToWav(buffer) {
+        const samples = buffer.getChannelData(0);
+        const bytes = new ArrayBuffer(44 + samples.length * 2);
+        const view = new DataView(bytes);
+        const label = (offset, value) => { for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i)); };
+        label(0, "RIFF"); view.setUint32(4, bytes.byteLength - 8, true);
+        label(8, "WAVE"); label(12, "fmt "); view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+        view.setUint32(24, buffer.sampleRate, true); view.setUint32(28, buffer.sampleRate * 2, true);
+        view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+        label(36, "data"); view.setUint32(40, samples.length * 2, true);
+        for (let i = 0; i < samples.length; i++) {
+          const sample = Math.max(-1, Math.min(1, samples[i]));
+          view.setInt16(44 + i * 2, sample < 0 ? sample * 32768 : sample * 32767, true);
+        }
+        return new Blob([bytes], { type: "audio/wav" });
+      }
+
+      async function getAudio(duration) {
+        if (typeof globalThis.scheduleAudio !== "function") return null;
+        if (!Number.isFinite(duration) || duration < 1 || duration > 600) throw new Error("効果音の長さは1～600秒にしてください。");
+        if (audioRender?.duration === duration) return audioRender.promise;
+        const promise = (async () => {
+          const sampleRate = 44100;
+          const context = new OfflineAudioContext(1, Math.ceil(duration * sampleRate), sampleRate);
+          await globalThis.scheduleAudio(context, duration);
+          return audioToWav(await context.startRendering());
+        })();
+        audioRender = { duration, promise };
+        return promise;
+      }
 
       window.addEventListener("error", (event) => {
         if (initialized) send("error", { message: event.error?.stack || event.message });
@@ -534,7 +574,7 @@
         rendering = true;
         try {
           if (previewPaused) return;
-          const duration = getDeclaredDuration();
+          const duration = playbackDuration;
           const elapsed = (now - previewStartedAt) / 1000;
           previewTime = duration ? elapsed % duration : elapsed;
           await globalThis.renderAt(previewTime);
@@ -561,7 +601,7 @@
         return Number.isFinite(seconds) && seconds >= 1 ? seconds : null;
       }
 
-      async function initialize(code, width, height, fps, overrides) {
+      async function initialize(code, width, height, fps, overrides, duration) {
         previewWidth = width;
         previewHeight = height;
         previewFps = [24, 30, 60].includes(fps) ? fps : 30;
@@ -609,10 +649,16 @@
         await globalThis.renderAt(0);
         syncDomAnimations(0);
         initialized = true;
+        audioDuration = duration || getDeclaredDuration() || 10;
+        playbackDuration = audioDuration;
         document.documentElement.dataset.stage = "initialized";
         previewStartedAt = performance.now();
         lastPreviewFrameAt = previewStartedAt;
-        send("ready", { duration: getDeclaredDuration() });
+        send("ready", { duration: getDeclaredDuration(), hasAudio: typeof globalThis.scheduleAudio === "function" });
+        if (typeof globalThis.scheduleAudio === "function") {
+          getAudio(audioDuration).then((blob) => send("audio-ready", { blob, duration: audioDuration }))
+            .catch((error) => send("audio-error", { message: describe(error) }));
+        }
       }
 
       window.addEventListener("message", async (event) => {
@@ -625,7 +671,7 @@
           runId = data.runId;
           initializing = true;
           try {
-            await initialize(data.code, data.width, data.height, data.fps, data.overrides);
+            await initialize(data.code, data.width, data.height, data.fps, data.overrides, data.duration);
           } catch (error) {
             send("error", { message: describe(error) });
           } finally {
@@ -639,6 +685,25 @@
         if (data.type === "preview-fps") {
           previewFps = [24, 30, 60].includes(data.fps) ? data.fps : 30;
           lastPreviewFrameAt = performance.now();
+        }
+
+        if (data.type === "preview-duration") {
+          const nextDuration = Number(data.duration) || getDeclaredDuration() || 10;
+          if (nextDuration === playbackDuration) return;
+          playbackDuration = nextDuration;
+          if (typeof globalThis.scheduleAudio === "function") {
+            audioDuration = playbackDuration;
+            getAudio(audioDuration).then((blob) => send("audio-ready", { blob, duration: audioDuration }))
+              .catch((error) => send("audio-error", { message: describe(error) }));
+          }
+        }
+
+        if (data.type === "export-audio") {
+          try {
+            send("export-audio-ready", { blob: await getAudio(data.duration) });
+          } catch (error) {
+            send("export-audio-error", { message: describe(error) });
+          }
         }
 
         if (data.type === "preview-play-state") {
@@ -696,12 +761,16 @@
 
         if (data.type === "export-frame") {
           try {
+            const renderStartedAt = performance.now();
             await globalThis.renderAt(data.timeSeconds);
             syncDomAnimations(data.timeSeconds);
+            const renderMs = performance.now() - renderStartedAt;
             const canvas = trackedThree.renderer?.domElement || document.querySelector("canvas");
             if (!canvas) throw new Error("書き出せるCanvasが見つかりません。");
-            const blob = await stageToPngBlob(canvas);
-            send("export-frame", { requestId: data.requestId, blob, width: exportWidth, height: exportHeight });
+            const imageStartedAt = performance.now();
+            const blob = await stageToBlob(canvas, data.format === "jpeg" ? "jpeg" : "png");
+            send("export-frame", { requestId: data.requestId, blob, width: exportWidth, height: exportHeight,
+              renderMs, imageMs: performance.now() - imageStartedAt });
           } catch (error) {
             send("export-frame-error", { requestId: data.requestId, message: describe(error) });
           }

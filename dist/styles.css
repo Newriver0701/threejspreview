@@ -289,6 +289,7 @@ h2 {
 .timeline-controls { display: flex; align-items: center; gap: 10px; padding: 12px 18px; }
 .timeline-controls input { flex: 1; min-width: 0; }
 .timeline-controls button { padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.timeline-controls #preview-audio-enable { border-color: var(--accent); color: var(--accent); font-weight: 700; }
 .timeline-controls span { min-width: 95px; text-align: right; font-size: 12px; color: var(--muted); }
 
 .export-panel {
@@ -444,6 +445,8 @@ footer {
   .preview-size-field select { max-width: 180px; }
   #code-editor { min-height: 320px; padding: 18px; font-size: 12px; }
   .stage-wrap { min-height: 300px; padding: 12px; }
+  .timeline-controls { flex-wrap: wrap; }
+  .timeline-controls #preview-audio-enable:not([hidden]) { order: 4; flex-basis: 100%; }
   .actions { flex-wrap: wrap; }
   .button { flex: 1; }
   .export-controls { grid-template-columns: 1fr; }

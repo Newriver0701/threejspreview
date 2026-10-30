@@ -35,6 +35,7 @@ const resetButton = document.querySelector("#reset-button");
 const frame = document.querySelector("#preview-frame");
 const previewViewport = document.querySelector("#preview-viewport");
 const previewPlayToggle = document.querySelector("#preview-play-toggle");
+const previewAudioEnable = document.querySelector("#preview-audio-enable");
 const previewTimeline = document.querySelector("#preview-timeline");
 const previewTimeLabel = document.querySelector("#preview-time-label");
 const emptyState = document.querySelector("#empty-state");
@@ -67,6 +68,11 @@ let frameRequestId = 0;
 let exportCancelRequested = false;
 let previewPaused = false;
 let detectedDuration = null;
+let hasAudio = false;
+let audioElement = null;
+let audioUrl = null;
+let audioEnabled = false;
+let lastPreviewTime = 0;
 const pendingFrameRequests = new Map();
 
 editor.value = localStorage.getItem("three-preview-draft") || SAMPLE_CODE;
@@ -150,8 +156,39 @@ function postToPreview(type, payload = {}) {
   frame.contentWindow?.postMessage({ source: "three-preview-host", runId, type, ...payload }, "*");
 }
 
+function clearPreviewAudio() {
+  audioElement?.pause();
+  audioElement?.removeAttribute("src");
+  audioElement?.load();
+  if (audioUrl) URL.revokeObjectURL(audioUrl);
+  audioUrl = null;
+  audioElement = null;
+  audioEnabled = false;
+  hasAudio = false;
+  previewAudioEnable.hidden = true;
+}
+
+function seekAudio(timeSeconds) {
+  if (!audioElement) return;
+  const end = Number.isFinite(audioElement.duration) ? Math.max(0, audioElement.duration - 0.01) : timeSeconds;
+  audioElement.currentTime = Math.max(0, Math.min(timeSeconds, end));
+}
+
+async function playPreviewAudio() {
+  if (!audioElement || previewPaused || exporting) return;
+  try {
+    if (Math.abs(audioElement.currentTime - lastPreviewTime) > 0.2) seekAudio(lastPreviewTime);
+    await audioElement.play();
+    audioEnabled = true;
+    previewAudioEnable.hidden = true;
+  } catch {
+    previewAudioEnable.hidden = false;
+  }
+}
+
 function runCode() {
   if (exporting) return;
+  clearPreviewAudio();
   clearError();
   runId += 1;
   previewReady = false;
@@ -160,6 +197,7 @@ function runCode() {
   previewPlayToggle.disabled = true;
   previewTimeline.disabled = true;
   previewTimeline.value = "0";
+  lastPreviewTime = 0;
   detectedDuration = null;
   updateDurationControls();
   updateRuntimeCandidates([]);
@@ -177,7 +215,7 @@ function runCode() {
   const sendInitialization = () => {
     if (currentRunId === runId) {
       frame.dataset.initSent = String(Number(frame.dataset.initSent || 0) + 1);
-      postToPreview("initialize", { code: editor.value, ...getPreviewSize(), fps: getSelectedExportFrameRate(), overrides: getImageOverrides() });
+      postToPreview("initialize", { code: editor.value, ...getPreviewSize(), fps: getSelectedExportFrameRate(), duration: Number(previewTimeline.max), overrides: getImageOverrides() });
     }
   };
   setTimeout(sendInitialization, 250);
@@ -206,7 +244,7 @@ function waitForPreview(successType, errorType, timeoutMs = 30_000) {
   });
 }
 
-function requestPngFrame(timeSeconds) {
+function requestFrame(timeSeconds, format) {
   return new Promise((resolve, reject) => {
     const requestId = ++frameRequestId;
     const timer = setTimeout(() => {
@@ -225,7 +263,7 @@ function requestPngFrame(timeSeconds) {
       }
     });
 
-    postToPreview("export-frame", { requestId, timeSeconds });
+    postToPreview("export-frame", { requestId, timeSeconds, format });
   });
 }
 
@@ -249,7 +287,7 @@ function getExportSettings() {
     fast: { crf: "28", preset: "ultrafast" }
   }[qualitySelect.value];
 
-  return { width, height, fps: Number(fpsText), duration, ...quality };
+  return { width, height, fps: Number(fpsText), duration, format: qualitySelect.value === "fast" ? "jpeg" : "png", ...quality };
 }
 
 async function resizePreview() {
@@ -346,6 +384,7 @@ async function runMp4Export() {
   durationModeSelect.disabled = true;
   durationInput.disabled = true;
   exportLabel.textContent = "書き出し中…";
+  audioElement?.pause();
 
   const temporaryFiles = new Set();
   let writtenFrameCount = 0;
@@ -353,11 +392,14 @@ async function runMp4Export() {
   let previewExportStarted = false;
   let activeChunk = 0;
   let exportSucceeded = false;
+  const timing = { frameMs: 0, renderMs: 0, imageMs: 0, encodeMs: 0, audioMs: 0, totalMs: 0 };
+  const exportStartedAt = performance.now();
   lastFfmpegLog = "";
 
   try {
     const settings = getExportSettings();
     const frameCount = Math.round(settings.duration * settings.fps);
+    const frameExtension = settings.format === "jpeg" ? "jpg" : "png";
     let { ffmpeg, fetchFile } = await getFfmpeg();
 
     setExportProgress(0, "書き出し解像度を準備中…");
@@ -374,28 +416,37 @@ async function runMp4Export() {
       const currentFrames = [];
       for (let localIndex = 0; localIndex < framesThisSegment; localIndex += 1) {
         if (exportCancelRequested) throw new Error("書き出しを中断しました。");
+        const frameStartedAt = performance.now();
         const index = start + localIndex;
-        const frameData = await requestPngFrame(index / settings.fps);
+        const frameData = await requestFrame(index / settings.fps, settings.format);
         if (frameData.width !== settings.width || frameData.height !== settings.height) {
-          throw new Error(`PNGの解像度が一致しません（${frameData.width}×${frameData.height}）。`);
+          throw new Error(`フレームの解像度が一致しません（${frameData.width}×${frameData.height}）。`);
         }
-        const filename = `frame_${String(localIndex + 1).padStart(6, "0")}.png`;
+        if (frameData.blob.type !== (settings.format === "jpeg" ? "image/jpeg" : "image/png")) {
+          throw new Error("ブラウザが選択した画像形式でフレームを作成できませんでした。");
+        }
+        const filename = `frame_${String(localIndex + 1).padStart(6, "0")}.${frameExtension}`;
         temporaryFiles.add(filename);
         await ffmpeg.writeFile(filename, await fetchFile(frameData.blob));
+        timing.frameMs += performance.now() - frameStartedAt;
+        timing.renderMs += Number(frameData.renderMs) || 0;
+        timing.imageMs += Number(frameData.imageMs) || 0;
         currentFrames.push(filename);
         writtenFrameCount += 1;
-        setExportProgress(((index + 1) / frameCount) * 0.9, `10秒区間 ${activeChunk}: PNG ${localIndex + 1} / ${framesThisSegment}`);
+        setExportProgress(((index + 1) / frameCount) * 0.9, `10秒区間 ${activeChunk}: ${settings.format === "jpeg" ? "JPEG" : "PNG"} ${localIndex + 1} / ${framesThisSegment}`);
       }
 
       const segmentName = `segment_${String(segments.length).padStart(4, "0")}.ts`;
       temporaryFiles.add(segmentName);
       setExportProgress(((start + framesThisSegment) / frameCount) * 0.9, `10秒区間 ${activeChunk} を変換中…`);
+      const encodeStartedAt = performance.now();
       const segmentExit = await ffmpeg.exec([
-        "-framerate", String(settings.fps), "-start_number", "1", "-i", "frame_%06d.png",
+        "-framerate", String(settings.fps), "-start_number", "1", "-i", `frame_%06d.${frameExtension}`,
         "-frames:v", String(framesThisSegment), "-c:v", "libx264",
         "-preset", settings.preset, "-crf", settings.crf,
         "-pix_fmt", "yuv420p", "-f", "mpegts", segmentName
       ]);
+      timing.encodeMs += performance.now() - encodeStartedAt;
       if (segmentExit !== 0) throw new Error(`区間の変換に失敗しました（終了コード: ${segmentExit}）。`);
       const bytes = await ffmpeg.readFile(segmentName);
       segments.push({ name: segmentName, bytes });
@@ -404,7 +455,7 @@ async function runMp4Export() {
         if (result.status === "fulfilled") temporaryFiles.delete(currentFrames[index]);
         else failedFrameDeletes += 1;
       });
-      if (failedFrameDeletes) throw new Error("PNG一時ファイルの削除に失敗しました。書き出しを停止します。");
+      if (failedFrameDeletes) throw new Error("フレーム一時ファイルの削除に失敗しました。書き出しを停止します。");
       await ffmpeg.deleteFile(segmentName);
       temporaryFiles.delete(segmentName);
       releaseFfmpeg();
@@ -416,6 +467,16 @@ async function runMp4Export() {
     }
 
     if (exportCancelRequested) throw new Error("書き出しを中断しました。");
+    let audioBlob = null;
+    if (hasAudio) {
+      const audioStartedAt = performance.now();
+      setExportProgress(0.95, "効果音を生成中…");
+      const audioPromise = waitForPreview("export-audio-ready", "export-audio-error", 180_000);
+      postToPreview("export-audio", { duration: settings.duration });
+      audioBlob = (await audioPromise).blob;
+      if (!(audioBlob instanceof Blob) || !audioBlob.size) throw new Error("効果音を生成できませんでした。");
+      timing.audioMs = performance.now() - audioStartedAt;
+    }
     ({ ffmpeg } = await getFfmpeg());
     for (const segment of segments) {
       temporaryFiles.add(segment.name);
@@ -425,8 +486,18 @@ async function runMp4Export() {
     await ffmpeg.writeFile("segments.txt", new TextEncoder().encode(concatList));
     temporaryFiles.add("segments.txt");
     setExportProgress(0.95, "区間をMP4に結合中…");
+    const includeAudio = Boolean(audioBlob);
+    if (audioBlob) {
+      await ffmpeg.writeFile("audio.wav", await fetchFile(audioBlob));
+      temporaryFiles.add("audio.wav");
+      audioBlob = null;
+    }
     temporaryFiles.add("output.mp4");
-    const exitCode = await ffmpeg.exec([
+    const exitCode = await ffmpeg.exec(includeAudio ? [
+      "-f", "concat", "-safe", "0", "-i", "segments.txt", "-i", "audio.wav",
+      "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+      "-t", String(settings.duration), "-movflags", "faststart", "output.mp4"
+    ] : [
       "-f", "concat", "-safe", "0", "-i", "segments.txt",
       "-c", "copy", "-movflags", "faststart", "output.mp4"
     ]);
@@ -435,15 +506,19 @@ async function runMp4Export() {
 
     const data = await ffmpeg.readFile("output.mp4");
     const blob = new Blob([data], { type: "video/mp4" });
+    timing.totalMs = performance.now() - exportStartedAt;
     globalThis.__THREE_PREVIEW_LAST_EXPORT__ = {
       bytes: data.byteLength,
       hasFtyp: byteArrayContainsAscii(data, "ftyp"),
-      hasH264Avc1: byteArrayContainsAscii(data, "avc1")
+      hasH264Avc1: byteArrayContainsAscii(data, "avc1"),
+      hasAac: byteArrayContainsAscii(data, "mp4a"),
+      format: settings.format,
+      timing
     };
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     downloadBlob(blob, `three-preview-${timestamp}.mp4`);
     exportSucceeded = true;
-    setExportProgress(1, "MP4を保存しました");
+    setExportProgress(1, `MP4を保存しました（${Math.round(timing.totalMs / 1000)}秒）`);
     setStatus("running", "MP4を保存しました");
   } catch (error) {
     if (exportCancelRequested && error?.message === "書き出しを中断しました。") {
@@ -468,7 +543,7 @@ async function runMp4Export() {
     if (ffmpegInstance && exportSucceeded) {
       const names = [...temporaryFiles];
       const cleanup = await Promise.allSettled(names.map((name) => ffmpegInstance.deleteFile(name)));
-      failedFrameDeletes += cleanup.filter((result, index) => names[index].endsWith(".png") && result.status === "rejected").length;
+      failedFrameDeletes += cleanup.filter((result, index) => /\.(?:png|jpg)$/.test(names[index]) && result.status === "rejected").length;
     }
     releaseFfmpeg();
     temporaryFiles.clear();
@@ -489,6 +564,7 @@ async function runMp4Export() {
     durationInput.disabled = false;
     exportCancelButton.disabled = true;
     exportLabel.textContent = "MP4を書き出す";
+    if (!previewPaused && audioEnabled) void playPreviewAudio();
   }
 }
 
@@ -497,15 +573,17 @@ window.addEventListener("message", (event) => {
   if (event.source !== frame.contentWindow || data?.source !== "three-preview") return;
 
   if (data.type === "runtime-ready") {
-    postToPreview("initialize", { code: editor.value, ...getPreviewSize(), fps: getSelectedExportFrameRate(), overrides: getImageOverrides() });
+    postToPreview("initialize", { code: editor.value, ...getPreviewSize(), fps: getSelectedExportFrameRate(), duration: Number(previewTimeline.max), overrides: getImageOverrides() });
     return;
   }
 
   if (data.runId !== runId) return;
 
   if (data.type === "ready") {
+    hasAudio = Boolean(data.hasAudio);
     detectedDuration = Number.isFinite(data.duration) && data.duration >= 1 ? data.duration : null;
     updateDurationControls();
+    postToPreview("preview-duration", { duration: Number(previewTimeline.max) });
     previewReady = true;
     previewPlayToggle.disabled = false;
     previewTimeline.disabled = false;
@@ -516,13 +594,37 @@ window.addEventListener("message", (event) => {
 
   if (data.type === "texture-candidates") updateRuntimeCandidates(data.candidates);
 
+  if (data.type === "audio-ready" && hasAudio) {
+    if (data.duration !== Number(previewTimeline.max)) return;
+    audioElement?.pause();
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    audioUrl = URL.createObjectURL(data.blob);
+    audioElement = new Audio(audioUrl);
+    audioElement.loop = true;
+    audioElement.preload = "auto";
+    seekAudio(lastPreviewTime);
+    if (!previewPaused && audioEnabled) void playPreviewAudio();
+    else previewAudioEnable.hidden = audioEnabled;
+  }
+
+  if (data.type === "audio-error") showError(`効果音の生成に失敗しました。\n${data.message}`);
+
   if (data.type === "preview-time" && !previewPaused && !exporting) {
+    lastPreviewTime = data.timeSeconds;
     const time = Math.min(Number(previewTimeline.max), data.timeSeconds);
     previewTimeline.value = String(time);
     updateTimelineLabel(time);
+    if (audioElement && audioEnabled) {
+      if (Math.abs(audioElement.currentTime - time) > 0.2) seekAudio(time);
+      if (audioElement.paused) void playPreviewAudio();
+    }
   }
 
-  if (data.type === "preview-seeked") updateTimelineLabel(data.timeSeconds);
+  if (data.type === "preview-seeked") {
+    lastPreviewTime = data.timeSeconds;
+    seekAudio(data.timeSeconds);
+    updateTimelineLabel(data.timeSeconds);
+  }
 
   if (data.type === "error" || data.type === "console-error") {
     previewResolutionSelect.disabled = false;
@@ -533,7 +635,8 @@ window.addEventListener("message", (event) => {
     const pending = pendingFrameRequests.get(data.requestId);
     if (!pending) return;
     pendingFrameRequests.delete(data.requestId);
-    if (data.type === "export-frame") pending.resolve({ blob: data.blob, width: data.width, height: data.height });
+    if (data.type === "export-frame") pending.resolve({ blob: data.blob, width: data.width, height: data.height,
+      renderMs: data.renderMs, imageMs: data.imageMs });
     else pending.reject(new Error(data.message));
   }
 });
@@ -556,18 +659,31 @@ resolutionSelect.addEventListener("change", () => {
 durationModeSelect.addEventListener("change", () => {
   localStorage.setItem("three-export-duration-mode", durationModeSelect.value);
   updateDurationControls();
+  if (previewReady) postToPreview("preview-duration", { duration: Number(previewTimeline.max) });
 });
 durationInput.addEventListener("input", updateDurationControls);
+durationInput.addEventListener("change", () => {
+  if (previewReady) postToPreview("preview-duration", { duration: Number(previewTimeline.max) });
+});
 previewPlayToggle.addEventListener("click", () => {
   if (!previewReady || exporting) return;
   previewPaused = !previewPaused;
   previewPlayToggle.textContent = previewPaused ? "再生" : "一時停止";
   postToPreview("preview-play-state", { paused: previewPaused });
+  if (previewPaused) audioElement?.pause();
+  else void playPreviewAudio();
+});
+previewAudioEnable.addEventListener("click", () => {
+  audioEnabled = true;
+  void playPreviewAudio();
 });
 previewTimeline.addEventListener("input", () => {
   if (!previewReady || exporting) return;
   previewPaused = true;
   previewPlayToggle.textContent = "再生";
+  audioElement?.pause();
+  lastPreviewTime = Number(previewTimeline.value);
+  seekAudio(lastPreviewTime);
   updateTimelineLabel(Number(previewTimeline.value));
   postToPreview("preview-seek", { timeSeconds: Number(previewTimeline.value) });
 });

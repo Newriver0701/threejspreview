@@ -101,6 +101,7 @@
 
         <div class="timeline-controls">
           <button id="preview-play-toggle" type="button" disabled>一時停止</button>
+          <button id="preview-audio-enable" type="button" hidden>音を有効にする</button>
           <input id="preview-timeline" type="range" min="0" max="10" step="0.001" value="0" aria-label="プレビューをシーク" disabled />
           <span id="preview-time-label">0:00 / 0:10</span>
         </div>
@@ -111,7 +112,7 @@
               <span class="step">03</span>
               <h2 id="export-title">MP4 Export</h2>
             </div>
-            <span class="export-note">PNG連番 → H.264</span>
+            <span class="export-note">PNG / 高速JPEG → H.264</span>
           </div>
 
           <div class="export-controls">
@@ -150,7 +151,7 @@
               <select id="export-quality">
                 <option value="high">高画質 / CRF 20</option>
                 <option value="standard" selected>標準 / CRF 24</option>
-                <option value="fast">高速 / CRF 28</option>
+                <option value="fast">高速 / JPEG・CRF 28</option>
               </select>
             </label>
 
@@ -181,7 +182,7 @@
 
       <footer>
         <span>Three.jsとFFmpeg.wasmをブラウザ内で実行</span>
-        <span>映像のみ・音声トラックなし</span>
+        <span>JS効果音はAAC音声として書き出し</span>
       </footer>
     </main>
 
