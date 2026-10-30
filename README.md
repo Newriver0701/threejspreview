@@ -1,6 +1,6 @@
 # Three.js Preview
 
-Three.jsコードをsandbox iframe内でプレビューし、CanvasとHTML字幕を合成したPNG連番をFFmpeg.wasmでH.264 MP4へ変換するブラウザアプリです。Three.jsとFFmpegは同じドメインから配信され、サーバー側で動画変換は行いません。
+Three.jsコードをsandbox iframe内でプレビューし、CanvasとHTML字幕を合成したフレームをFFmpeg.wasmでH.264 MP4へ変換するブラウザアプリです。Three.jsとFFmpegは同じドメインから配信され、サーバー側で動画変換は行いません。
 
 ## セットアップ
 
@@ -79,7 +79,26 @@ globalThis.setRenderSize = async (width, height) => {
 
 JSが`stage`要素を作り、その中にThree.jsのCanvasとHTML字幕を配置するコードは、そのまま1つの入力欄へ貼れます。Canvasの親要素に字幕など別の子要素があれば自動的に動画ステージとして扱います。自動検出できない場合は`globalThis.videoStage = stage;`を設定してください。書き出し時はDOMの計算済みスタイルからCanvasへ描き、文字、文字影、単純なグラデーション、位置、透明度を反映します。CSSの複雑なフィルター、ブレンド効果、変形、画像背景などは完全再現の対象外です。外部フォントと画像はCORS対応が必要です。
 
-プレビュー中は`renderAt()`が実時間で呼ばれます。MP4書き出し中はプレビューを停止し、フレーム`i`ごとに`renderAt(i / fps)`を呼んでPNGを生成します。
+プレビュー中は`renderAt()`が実時間で呼ばれます。MP4書き出し中はプレビューを停止し、フレーム`i`ごとに`renderAt(i / fps)`を呼んでPNGまたはJPEGを生成します。
+
+JSで作る効果音は、同じコード欄で次の関数を追加します。各音の開始時刻は動画先頭からの秒数です。映像だけの作品には不要です。音声は44.1kHz・モノラルで生成され、プレビューの再生・停止・シークと同期し、MP4ではAACになります。ブラウザが自動再生を禁止した場合は「音を有効にする」を押してください。
+
+```js
+globalThis.scheduleAudio = (audioContext, durationSeconds) => {
+  for (const at of [6, 30, 59]) {
+    if (at >= durationSeconds) continue;
+    const oscillator = audioContext.createOscillator();
+    const volume = audioContext.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.value = at === 30 ? 660 : 440;
+    volume.gain.setValueAtTime(0.12, at);
+    volume.gain.exponentialRampToValueAtTime(0.001, Math.min(durationSeconds, at + 0.18));
+    oscillator.connect(volume).connect(audioContext.destination);
+    oscillator.start(at);
+    oscillator.stop(Math.min(durationSeconds, at + 0.2));
+  }
+};
+```
 
 プレビューとMP4の速度を一致させるため、プレビューの呼び出し回数もMP4側で選択した24fpsまたは30fpsに同期します。ユーザーコード内の独自`requestAnimationFrame()`／`renderer.setAnimationLoop()`は実行されません。アニメーション状態は可能な限り`renderAt(timeSeconds)`の引数から計算し、`rotation.y = timeSeconds * speed`のように時刻から直接求めてください。
 
@@ -88,9 +107,9 @@ JSが`stage`要素を作り、その中にThree.jsのCanvasとHTML字幕を配�
 - プレビュー解像度：1080×1920、720×1280、540×960、360×640、1080×1080、1920×1080
 - MP4解像度/FPS：1080×1920/30、720×1280/30、540×960/24、360×640/24、1080×1080/30、1920×1080/30
 - 動画時間：手動で1～600秒、またはJSが公開した終了時刻を自動使用（上限600秒）
-- 書き出し時は最大10秒分のPNGをH.264へ変換し、PNGを削除してFFmpegの作業領域を解放してから次の区間へ進みます。長尺は端末性能とブラウザのメモリ容量に左右され、特にiPhoneでの10分書き出しは成功を保証できません。
-- 画質：CRF 20、24、28
+- 書き出し時は最大10秒分のフレームをH.264へ変換し、一時フレームを削除してFFmpegの作業領域を解放してから次の区間へ進みます。長尺は端末性能とブラウザのメモリ容量に左右され、特にiPhoneでの10分書き出しは成功を保証できません。
+- 画質：高画質/標準はPNG・CRF 20/24、高速はJPEG品質90%・CRF 28。高速モードでは透明部分を黒に合成します。
 - 映像：H.264、`yuv420p`、`faststart`
-- 音声：なし
+- 音声：`scheduleAudio()`がある場合のみAAC。生成に失敗した場合はエラーとして書き出しを止めます。計測結果はブラウザコンソールの`__THREE_PREVIEW_LAST_EXPORT__.timing`で確認できます。
 
 外部画像をCanvasへ描画する場合、画像を同一オリジンまたは適切なCORS設定で読み込んでください。Canvasが汚染されるとPNG化できません。高解像度の10秒区間では一時的に大量のPNGを扱うため、端末のメモリを多く使用します。
